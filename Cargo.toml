@@ -1,0 +1,11 @@
+[workspace]
+members = ["sim", "mcts"]
+resolver = "3"
+
+[package]
+name = "figure-8-bin"
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+rand = "0.8"

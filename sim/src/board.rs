@@ -2,13 +2,13 @@ use core::fmt;
 use std::{
     array,
     cmp::Ordering,
-    ops::{Add, Index, IndexMut},
+    ops::{Add, AddAssign, Index, IndexMut},
     sync::LazyLock,
 };
 
 use rand::{Rng, seq::SliceRandom};
 
-use crate::PlayerId;
+use crate::{PlayerId, TileId};
 
 pub const NUM_TILES: usize = 19;
 pub const NUM_VERTICES: usize = 54;
@@ -137,65 +137,56 @@ pub static TOPO: LazyLock<Topology> = LazyLock::new(|| {
 
     // ----- Step 1: vertices per tile -----
     let mut tile_vertices = [[0u8; 6]; NUM_TILES];
-    for t in 0..NUM_TILES {
-        let (q, r) = HEX_AXIAL[t];
-        for c in 0..6 {
+    for (t, hex) in HEX_AXIAL.iter().enumerate() {
+        let (q, r) = *hex;
+        for (c, tv) in tile_vertices[t].iter_mut().enumerate() {
             let kx = 2 * q + r + VERTEX_DX[c];
             let ky = 3 * r + VERTEX_DY[c];
-            let vid = find_or_insert(&mut vkeys, &mut num_v, (kx, ky));
-            tile_vertices[t][c] = vid;
+            *tv = find_or_insert(&mut vkeys, &mut num_v, (kx, ky));
         }
     }
     assert_eq!(num_v, NUM_VERTICES);
 
     // ----- Step 2: edges per tile -----
     let mut tile_edges = [[0u8; 6]; NUM_TILES];
-    for t in 0..NUM_TILES {
+    for (tv, te) in tile_vertices.iter().zip(tile_edges.iter_mut()) {
         for e in 0..6 {
-            let v1 = tile_vertices[t][e];
-            let v2 = tile_vertices[t][(e + 1) % 6];
-            let (a, b) = if v1 < v2 { (v1, v2) } else { (v2, v1) };
-            let eid = find_or_insert_pair(&mut elist, &mut num_e, [a, b]);
-            tile_edges[t][e] = eid;
+            let (a, b) = (tv[e].min(tv[(e + 1) % 6]), tv[e].max(tv[(e + 1) % 6]));
+            te[e] = find_or_insert_pair(&mut elist, &mut num_e, [a, b]);
         }
     }
     assert_eq!(num_e, NUM_EDGES);
 
     // ----- Step 3: edge_vertices -----
     let mut edge_vertices = [[0u8; 2]; NUM_EDGES];
-    for i in 0..NUM_EDGES {
-        edge_vertices[i] = elist[i];
-    }
+    edge_vertices.copy_from_slice(&elist[..NUM_EDGES]);
 
     // ----- Step 4: vertex → tiles -----
     let mut vertex_tiles = [[0u8; 3]; NUM_VERTICES];
     let mut vertex_tile_count = [0u8; NUM_VERTICES];
-    for t in 0..NUM_TILES {
-        for c in 0..6 {
-            let v = tile_vertices[t][c] as usize;
-            let idx = vertex_tile_count[v] as usize;
-            vertex_tiles[v][idx] = t as u8;
-            vertex_tile_count[v] += 1;
+    for (t, tv) in tile_vertices.iter().enumerate() {
+        for &v in tv {
+            let vi = v as usize;
+            vertex_tiles[vi][vertex_tile_count[vi] as usize] = t as u8;
+            vertex_tile_count[vi] += 1;
         }
     }
 
     // ----- Step 5: edge → tiles (needed to identify coastal edges) -----
     let mut edge_tile_count = [0u8; NUM_EDGES];
-    for t in 0..NUM_TILES {
-        for e in 0..6 {
-            let eid = tile_edges[t][e] as usize;
-            edge_tile_count[eid] += 1;
+    for te in &tile_edges {
+        for &eid in te {
+            edge_tile_count[eid as usize] += 1;
         }
     }
 
     // ----- Step 6: vertex → edges -----
     let mut vertex_edges = [[0u8; 3]; NUM_VERTICES];
     let mut vertex_edge_count = [0u8; NUM_VERTICES];
-    for e in 0..NUM_EDGES {
-        for &v in &edge_vertices[e] {
+    for (e, &[v1, v2]) in edge_vertices.iter().enumerate() {
+        for v in [v1, v2] {
             let vi = v as usize;
-            let idx = vertex_edge_count[vi] as usize;
-            vertex_edges[vi][idx] = e as u8;
+            vertex_edges[vi][vertex_edge_count[vi] as usize] = e as u8;
             vertex_edge_count[vi] += 1;
         }
     }
@@ -203,29 +194,26 @@ pub static TOPO: LazyLock<Topology> = LazyLock::new(|| {
     // ----- Step 7: vertex → adjacent vertices -----
     let mut vertex_adjacent = [[0u8; 3]; NUM_VERTICES];
     let mut vertex_adj_count = [0u8; NUM_VERTICES];
-    for e in 0..NUM_EDGES {
-        let v1 = edge_vertices[e][0] as usize;
-        let v2 = edge_vertices[e][1] as usize;
-        let i1 = vertex_adj_count[v1] as usize;
-        vertex_adjacent[v1][i1] = v2 as u8;
-        vertex_adj_count[v1] += 1;
-        let i2 = vertex_adj_count[v2] as usize;
-        vertex_adjacent[v2][i2] = v1 as u8;
-        vertex_adj_count[v2] += 1;
+    for &[v1, v2] in &edge_vertices {
+        let (i1, i2) = (v1 as usize, v2 as usize);
+        vertex_adjacent[i1][vertex_adj_count[i1] as usize] = v2;
+        vertex_adj_count[i1] += 1;
+        vertex_adjacent[i2][vertex_adj_count[i2] as usize] = v1;
+        vertex_adj_count[i2] += 1;
     }
 
     // ----- Step 8: harbor positions -----
     // Sort coastal edges clockwise, then pick 9 fixed frame positions.
-    let mut ce_with_angle: Vec<(u8, f64)> = Vec::new();
-    for e in 0..NUM_EDGES {
-        if edge_tile_count[e] == 1 {
-            let v1 = edge_vertices[e][0] as usize;
-            let v2 = edge_vertices[e][1] as usize;
-            let mx = (vkeys[v1].0 as f64 + vkeys[v2].0 as f64) * 1.732_050_808;
-            let my = vkeys[v1].1 as f64 + vkeys[v2].1 as f64;
-            ce_with_angle.push((e as u8, f64::atan2(mx, -my)));
-        }
-    }
+    let mut ce_with_angle: Vec<(u8, f64)> = edge_vertices
+        .iter()
+        .enumerate()
+        .filter(|&(e, _)| edge_tile_count[e] == 1)
+        .map(|(e, &[v1, v2])| {
+            let mx = (vkeys[v1 as usize].0 as f64 + vkeys[v2 as usize].0 as f64) * 1.732_050_808;
+            let my = vkeys[v1 as usize].1 as f64 + vkeys[v2 as usize].1 as f64;
+            (e as u8, f64::atan2(mx, -my))
+        })
+        .collect();
     ce_with_angle.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
     assert_eq!(ce_with_angle.len(), 30);
 
@@ -233,8 +221,7 @@ pub static TOPO: LazyLock<Topology> = LazyLock::new(|| {
     let mut port_vertices = [[0u8; 2]; NUM_PORTS];
     let mut vertex_port = [None; NUM_VERTICES];
     for (slot, &cei) in PORT_COASTAL_INDICES.iter().enumerate() {
-        let eid = ce_with_angle[cei].0 as usize;
-        let verts = edge_vertices[eid];
+        let verts = edge_vertices[ce_with_angle[cei].0 as usize];
         port_vertices[slot] = verts;
         vertex_port[verts[0] as usize] = Some(slot as u8);
         vertex_port[verts[1] as usize] = Some(slot as u8);
@@ -255,10 +242,8 @@ pub static TOPO: LazyLock<Topology> = LazyLock::new(|| {
 });
 
 fn find_or_insert(buf: &mut [(i8, i8); 120], count: &mut usize, key: (i8, i8)) -> u8 {
-    for i in 0..*count {
-        if buf[i] == key {
-            return i as u8;
-        }
+    if let Some(pos) = buf[..*count].iter().position(|&k| k == key) {
+        return pos as u8;
     }
     let id = *count as u8;
     buf[*count] = key;
@@ -267,19 +252,14 @@ fn find_or_insert(buf: &mut [(i8, i8); 120], count: &mut usize, key: (i8, i8)) -
 }
 
 fn find_or_insert_pair(buf: &mut [[u8; 2]; 150], count: &mut usize, pair: [u8; 2]) -> u8 {
-    for i in 0..*count {
-        if buf[i] == pair {
-            return i as u8;
-        }
+    if let Some(pos) = buf[..*count].iter().position(|&p| p == pair) {
+        return pos as u8;
     }
     let id = *count as u8;
     buf[*count] = pair;
     *count += 1;
     id
 }
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TileId(pub u8);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Terrain {
@@ -405,6 +385,9 @@ impl Board {
         let mut harbors = STANDARD_PORTS;
         harbors.shuffle(rng);
 
+        let mut dev_card_deck = STANDARD_DEV_CARD_DECK;
+        dev_card_deck.shuffle(rng);
+
         Board {
             tiles,
             vertices: [Vertex::Empty; NUM_VERTICES],
@@ -412,7 +395,7 @@ impl Board {
             robber,
             harbors,
             bank: STANDARD_BANK,
-            dev_card_deck: DevCardDeck::generate(rng),
+            dev_card_deck: DevCardDeck(dev_card_deck, NUM_DEV_CARDS - 1),
         }
     }
 }
@@ -511,32 +494,80 @@ pub enum DevelopmentCard {
     Monopoly = 4,
 }
 
-pub const NUM_DEV_CARDS: usize = 25;
+const NUM_DEV_CARDS: usize = 25;
+
+#[rustfmt::skip]
+const STANDARD_DEV_CARD_DECK: [DevelopmentCard; NUM_DEV_CARDS] = [
+    DevelopmentCard::Knight, DevelopmentCard::Knight, DevelopmentCard::Knight, 
+    DevelopmentCard::Knight, DevelopmentCard::Knight, DevelopmentCard::Knight, 
+    DevelopmentCard::Knight, DevelopmentCard::Knight, DevelopmentCard::Knight, 
+    DevelopmentCard::Knight, DevelopmentCard::Knight, DevelopmentCard::Knight, 
+    DevelopmentCard::Knight, DevelopmentCard::Knight, 
+    DevelopmentCard::VictoryPoint, DevelopmentCard::VictoryPoint, DevelopmentCard::VictoryPoint,
+    DevelopmentCard::VictoryPoint, DevelopmentCard::VictoryPoint, 
+    DevelopmentCard::RoadBuilding, DevelopmentCard::RoadBuilding,
+    DevelopmentCard::YearOfPlenty, DevelopmentCard::YearOfPlenty,
+    DevelopmentCard::Monopoly, DevelopmentCard::Monopoly,
+];
 
 #[derive(Clone, Debug)]
 pub struct DevCardDeck([DevelopmentCard; NUM_DEV_CARDS], usize);
 
 impl DevCardDeck {
-    pub fn generate(rng: &mut impl Rng) -> Self {
-        let mut deck = [DevelopmentCard::Knight; NUM_DEV_CARDS];
-        deck.shuffle(rng);
-        Self(deck, 0)
-    }
-
-    pub fn remaining(&self) -> usize {
-        NUM_DEV_CARDS - self.1
-    }
-
     pub fn draw(&mut self) -> Option<DevelopmentCard> {
-        let DevCardDeck(cards, i) = self;
-
-        if *i >= NUM_DEV_CARDS {
+        if self.1 == 0 {
             return None;
         }
+        self.1 -= 1;
+        Some(self.0[self.1])
+    }
 
-        let card = cards[*i];
-        *i += 1;
+    pub fn remaining(&self) -> u8 {
+        self.1 as u8
+    }
+}
 
-        Some(card)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DevCardHand(pub [u8; 5]);
+
+impl DevCardHand {
+    pub const EMPTY: Self = Self([0; 5]);
+
+    pub fn checked_sub_assign(&mut self, c: DevelopmentCard) -> bool {
+        let slot = &mut self.0[c as usize];
+
+        if *slot > 0 {
+            *slot -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn total(&self) -> u8 {
+        self.0.iter().sum()
+    }
+
+    pub fn has(&self, c: DevelopmentCard) -> bool {
+        self.0[c as usize] > 0
+    }
+}
+
+impl AddAssign<DevelopmentCard> for DevCardHand {
+    fn add_assign(&mut self, c: DevelopmentCard) {
+        self.0[c as usize] += 1;
+    }
+}
+
+impl Index<DevelopmentCard> for DevCardHand {
+    type Output = u8;
+    fn index(&self, c: DevelopmentCard) -> &u8 {
+        &self.0[c as usize]
+    }
+}
+
+impl IndexMut<DevelopmentCard> for DevCardHand {
+    fn index_mut(&mut self, c: DevelopmentCard) -> &mut u8 {
+        &mut self.0[c as usize]
     }
 }

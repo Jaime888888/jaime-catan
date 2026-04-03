@@ -1,5 +1,4 @@
-use crate::board::{Resource, TileId};
-use crate::types::{EdgeId, PlayerId, VertexId};
+use crate::{EdgeId, PlayerId, TileId, VertexId, board::Resource};
 
 const ALL_RESOURCES: [Resource; 5] = [
     Resource::Brick,
@@ -55,17 +54,17 @@ pub const ACTION_SPACE_SIZE: usize = 254;
 impl Action {
     pub fn to_index(self) -> usize {
         match self {
-            Action::PlaceSettlement(v) => v.idx(),
-            Action::PlaceRoad(e) => 54 + e.idx(),
-            Action::BuildCity(v) => 126 + v.idx(),
+            Action::PlaceSettlement(VertexId(vid)) => vid as usize,
+            Action::PlaceRoad(EdgeId(eid)) => 54 + eid as usize,
+            Action::BuildCity(VertexId(vid)) => 126 + vid as usize,
             Action::BuyDevelopmentCard => 180,
             Action::PlayKnight => 181,
             Action::PlayRoadBuilding => 182,
             Action::PlayYearOfPlenty(r1, r2) => 183 + yop_pair_index(r1, r2),
             Action::PlayMonopoly(r) => 198 + r as usize,
             Action::RollDice => 203,
-            Action::MoveRobber(t) => 204 + t.0 as usize,
-            Action::StealFrom(p) => 223 + p.idx(),
+            Action::MoveRobber(TileId(tid)) => 204 + tid as usize,
+            Action::StealFrom(PlayerId(pid)) => 223 + pid as usize,
             Action::StealFromNone => 227,
             Action::DiscardResource(r) => 228 + r as usize,
             Action::BankTrade { give, receive } => 233 + bank_trade_index(give, receive),
@@ -167,16 +166,8 @@ impl ActionMask {
         self.bits[idx / 64] |= 1u64 << (idx % 64);
     }
 
-    pub fn clear(&mut self, idx: usize) {
-        self.bits[idx / 64] &= !(1u64 << (idx % 64));
-    }
-
-    pub fn is_set(self, idx: usize) -> bool {
+    pub fn get(self, idx: usize) -> bool {
         self.bits[idx / 64] & (1u64 << (idx % 64)) != 0
-    }
-
-    pub fn is_empty(self) -> bool {
-        self.bits == [0; 4]
     }
 
     pub fn count(self) -> u32 {
@@ -189,6 +180,15 @@ impl ActionMask {
 
     pub fn set_action(&mut self, action: Action) {
         self.set(action.to_index());
+    }
+}
+
+impl IntoIterator for ActionMask {
+    type Item = usize;
+    type IntoIter = ActionMaskIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
@@ -243,15 +243,15 @@ mod tests {
     #[test]
     fn action_mask_basics() {
         let mut m = ActionMask::EMPTY;
-        assert!(m.is_empty());
+        assert_eq!(m.count(), 0);
         m.set(0);
         m.set(253);
         m.set(100);
         assert_eq!(m.count(), 3);
-        assert!(m.is_set(0));
-        assert!(m.is_set(100));
-        assert!(m.is_set(253));
-        assert!(!m.is_set(1));
+        assert!(m.get(0));
+        assert!(m.get(100));
+        assert!(m.get(253));
+        assert!(!m.get(1));
         let items: Vec<_> = m.iter().collect();
         assert_eq!(items, vec![0, 100, 253]);
     }

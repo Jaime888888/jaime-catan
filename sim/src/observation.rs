@@ -1,10 +1,9 @@
-use crate::Game;
 use crate::board::{
-    DevelopmentCard, Edge, NUM_EDGES, NUM_PORTS, NUM_TILES, NUM_VERTICES, Port, ResourceBank, TOPO,
-    Terrain, TileId, Vertex,
+    DevCardHand, DevelopmentCard, Edge, NUM_EDGES, NUM_PORTS, NUM_TILES, NUM_VERTICES, Port,
+    ResourceBank, TOPO, Terrain, Vertex,
 };
 use crate::transition::longest_road;
-use crate::types::{DevCardHand, PlayerId};
+use crate::{Game, PlayerId, TileId};
 
 // ---------------------------------------------------------------------------
 // Relative player identity (perspective-independent)
@@ -165,7 +164,7 @@ impl Game {
         let p = &self.players[perspective.idx()];
         let self_player = SelfPlayerObs {
             resources: p.resources,
-            dev_cards: p.dev_cards,
+            dev_cards: p.dev_cards.clone(),
             played_knights: p.played_knights,
             victory_points: self.victory_points(perspective),
             has_longest_road: self.longest_road_owner == Some(perspective),
@@ -189,7 +188,7 @@ impl Game {
                 played_knights: op.played_knights,
                 public_victory_points: self
                     .victory_points(pid)
-                    .saturating_sub(op.dev_cards.get(DevelopmentCard::VictoryPoint)),
+                    .saturating_sub(op.dev_cards[DevelopmentCard::VictoryPoint]),
                 has_longest_road: self.longest_road_owner == Some(pid),
                 has_largest_army: self.largest_army_owner == Some(pid),
                 settlements_left: op.settlements_left,
@@ -200,7 +199,7 @@ impl Game {
 
         let meta = GameMetaObs {
             turn_number: self.turn_number,
-            dev_cards_remaining: self.board.dev_card_deck.remaining() as u8,
+            dev_cards_remaining: self.board.dev_card_deck.remaining(),
             bank: self.board.bank,
         };
 

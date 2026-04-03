@@ -31,7 +31,7 @@ fn main() {
         game.apply_action(actions[idx], &mut rng).unwrap();
         action_count += 1;
 
-        if action_count % 100 == 0 {
+        if action_count.is_multiple_of(100) {
             println!(
                 "  action #{action_count}: turn={}, player={}, phase={:?}",
                 game.turn_number,

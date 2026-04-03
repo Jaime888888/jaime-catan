@@ -3,10 +3,14 @@ use rand::Rng;
 use crate::action::{Action, ActionMask};
 use crate::board::{
     DevelopmentCard, Edge, NUM_EDGES, NUM_TILES, NUM_VERTICES, Resource, ResourceBank, TOPO,
-    TileId, Topology, Vertex,
+    Topology, Vertex,
 };
-use crate::types::*;
-use crate::{Game, Phase};
+use crate::{DevCardHand, EdgeId, Game, Phase, Player, PlayerId, TileId, VertexId};
+
+const SETTLEMENT_COST: ResourceBank = ResourceBank([1, 1, 0, 1, 1]);
+const CITY_COST: ResourceBank = ResourceBank([0, 0, 3, 2, 0]);
+const ROAD_COST: ResourceBank = ResourceBank([1, 1, 0, 0, 0]);
+const DEV_CARD_COST: ResourceBank = ResourceBank([0, 0, 1, 1, 1]);
 
 const ALL_RESOURCES: [Resource; 5] = [
     Resource::Brick,
@@ -15,24 +19,6 @@ const ALL_RESOURCES: [Resource; 5] = [
     Resource::Grain,
     Resource::Wool,
 ];
-
-// =========================================================================
-// Error
-// =========================================================================
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InvalidAction {
-    pub action: Action,
-    pub reason: &'static str,
-}
-
-impl std::fmt::Display for InvalidAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "invalid action {:?}: {}", self.action, self.reason)
-    }
-}
-
-impl std::error::Error for InvalidAction {}
 
 // =========================================================================
 // Legal action computation
@@ -66,8 +52,11 @@ impl Game {
                 }
             }
             Phase::ChanceRoll => {}
-            Phase::Discard { active, .. } => {
-                let p = &self.players[active.idx()];
+            Phase::Discard {
+                active: PlayerId(i),
+                ..
+            } => {
+                let p = &self.players[*i as usize];
                 for r in ALL_RESOURCES {
                     if p.resources[r] > 0 {
                         mask.set_action(Action::DiscardResource(r));
@@ -82,24 +71,19 @@ impl Game {
                 }
             }
             Phase::Steal { candidates } => {
-                if candidates.is_empty() {
+                for (i, &is_candidate) in candidates.iter().enumerate() {
+                    if is_candidate && self.players[i].resources.total() > 0 {
+                        mask.set_action(Action::StealFrom(PlayerId(i as u8)));
+                    }
+                }
+                if mask.count() == 0 {
                     mask.set_action(Action::StealFromNone);
-                } else {
-                    for pid in candidates.iter() {
-                        if self.players[pid.idx()].resources.total() > 0 {
-                            mask.set_action(Action::StealFrom(pid));
-                        }
-                    }
-                    if mask.is_empty() {
-                        mask.set_action(Action::StealFromNone);
-                    }
                 }
             }
             Phase::Main => self.legal_main_phase(&mut mask),
             Phase::RoadBuilding { .. } => {
-                let pid = self.current_player;
-                if self.players[pid.idx()].roads_left > 0 {
-                    self.add_legal_road_placements(pid, &mut mask);
+                if self.players[self.current_player.idx()].roads_left > 0 {
+                    self.add_legal_road_placements(self.current_player, &mut mask);
                 }
             }
             Phase::GameOver { .. } => {}
@@ -131,10 +115,10 @@ impl Game {
 
         if player.cities_left > 0 && player.resources.can_afford(CITY_COST) {
             for v in 0..NUM_VERTICES {
-                if let Vertex::Settlement(p) = self.board.vertices[v] {
-                    if p == pid {
-                        mask.set_action(Action::BuildCity(VertexId(v as u8)));
-                    }
+                if let Vertex::Settlement(p) = self.board.vertices[v]
+                    && p == pid
+                {
+                    mask.set_action(Action::BuildCity(VertexId(v as u8)));
                 }
             }
         }
@@ -192,9 +176,9 @@ impl Game {
                 continue;
             }
             let [v1, v2] = topo.edge_vertices[e];
-            let ok_v1 = self.vertex_accessible_for_road(player, v1 as usize);
-            let ok_v2 = self.vertex_accessible_for_road(player, v2 as usize);
-            if ok_v1 || ok_v2 {
+            if self.vertex_accessible_for_road(player, v1 as usize)
+                || self.vertex_accessible_for_road(player, v2 as usize)
+            {
                 mask.set_action(Action::PlaceRoad(EdgeId(e as u8)));
             }
         }
@@ -208,22 +192,17 @@ impl Game {
     }
 
     fn can_play_dev_card(&self, card: DevelopmentCard) -> bool {
-        if card == DevelopmentCard::VictoryPoint {
+        if card == DevelopmentCard::VictoryPoint || self.dev_card_played_this_turn {
             return false;
         }
-        if self.dev_card_played_this_turn {
-            return false;
-        }
-        let playable = self.players[self.current_player.idx()]
-            .dev_cards
-            .get(card)
-            .saturating_sub(self.dev_cards_bought_this_turn.get(card));
-        playable > 0
+        let held = self.players[self.current_player.idx()].dev_cards[card];
+        let bought = self.dev_cards_bought_this_turn[card];
+        held > bought
     }
 }
 
 // =========================================================================
-// State machine transitions
+// State machine transition
 // =========================================================================
 
 impl Game {
@@ -233,137 +212,236 @@ impl Game {
         rng: &mut impl Rng,
     ) -> Result<(), InvalidAction> {
         let mask = self.action_mask();
-        if !mask.is_set(action.to_index()) {
+        if !mask.get(action.to_index()) {
             return Err(InvalidAction {
                 action,
                 reason: "action not legal in current state",
             });
         }
 
-        match action {
-            Action::PlaceSettlement(v) => self.do_place_settlement(v),
-            Action::PlaceRoad(e) => self.do_place_road(e),
-            Action::BuildCity(v) => self.do_build_city(v),
-            Action::BuyDevelopmentCard => self.do_buy_dev_card(),
-            Action::PlayKnight => self.do_play_knight(),
-            Action::PlayRoadBuilding => self.do_play_road_building(),
-            Action::PlayYearOfPlenty(r1, r2) => self.do_year_of_plenty(r1, r2),
-            Action::PlayMonopoly(r) => self.do_monopoly(r),
-            Action::RollDice => self.do_roll_dice(),
-            Action::MoveRobber(t) => self.do_move_robber(t),
-            Action::StealFrom(p) => self.do_steal(p, rng),
-            Action::StealFromNone => self.after_steal(),
-            Action::DiscardResource(r) => self.do_discard(r),
-            Action::BankTrade { give, receive } => self.do_bank_trade(give, receive),
-            Action::EndTurn => self.do_end_turn(),
-        }
-        Ok(())
-    }
-
-    // ----- Setup -----
-
-    pub const SETTLEMENT_COST: ResourceBank = ResourceBank([1, 1, 0, 1, 1]);
-    pub const CITY_COST: ResourceBank = ResourceBank([0, 0, 3, 2, 0]);
-    pub const ROAD_COST: ResourceBank = ResourceBank([1, 1, 0, 0, 0]);
-    pub const DEV_CARD_COST: ResourceBank = ResourceBank([0, 0, 1, 1, 1]);
-
-    fn do_place_settlement(&mut self, v: VertexId) {
-        let vi = v.idx();
         let topo = &*TOPO;
+        let pid = self.acting_player();
+        let pi = pid.idx();
 
-        match &self.phase {
-            Phase::SetupSettlement { player, round } => {
-                let player = *player;
-                let round = *round;
-
-                self.board.vertices[vi] = Vertex::Settlement(player);
-                self.players[player.idx()].settlements_left -= 1;
-
+        match action {
+            Action::PlaceSettlement(v) => {
+                let vi = v.idx();
+                self.board.vertices[vi] = Vertex::Settlement(pid);
+                self.players[pi].settlements_left -= 1;
                 if let Some(pt) = self.board.port_at(vi) {
-                    self.players[player.idx()].update_ports(pt);
+                    self.players[pi].update_ports(pt);
                 }
 
-                if round == 2 {
-                    for &t in topo.vertex_tiles(vi) {
-                        if let Some(resource) = self.board.tiles[t as usize].terrain.resource() {
-                            if self.board.bank[resource] > 0 {
-                                self.players[player.idx()].resources[resource] += 1;
-                                self.board.bank[resource] -= 1;
+                match &self.phase {
+                    Phase::SetupSettlement { player, round } => {
+                        let (player, round) = (*player, *round);
+                        if round == 2 {
+                            for &t in topo.vertex_tiles(vi) {
+                                if let Some(r) = self.board.tiles[t as usize].terrain.resource()
+                                    && self.board.bank[r] > 0
+                                {
+                                    self.players[pi].resources[r] += 1;
+                                    self.board.bank[r] -= 1;
+                                }
                             }
                         }
+                        self.phase = Phase::SetupRoad {
+                            player,
+                            round,
+                            settlement_vertex: v.0,
+                        };
                     }
+                    Phase::Main => {
+                        self.pay(pid, SETTLEMENT_COST);
+                        self.update_longest_road();
+                        self.check_victory();
+                    }
+                    _ => unreachable!(),
                 }
-
-                self.phase = Phase::SetupRoad {
-                    player,
-                    round,
-                    settlement_vertex: v.0,
-                };
             }
-            Phase::Main => {
-                let pid = self.current_player;
-                self.pay(pid, SETTLEMENT_COST);
-                self.board.vertices[vi] = Vertex::Settlement(pid);
-                self.players[pid.idx()].settlements_left -= 1;
+            Action::PlaceRoad(e) => {
+                self.board.edges[e.idx()] = Edge::Road(pid);
+                self.players[pi].roads_left -= 1;
 
-                if let Some(pt) = self.board.port_at(vi) {
-                    self.players[pid.idx()].update_ports(pt);
+                match self.phase.clone() {
+                    Phase::SetupRoad { player, round, .. } => self.advance_setup(player, round),
+                    Phase::Main => {
+                        self.pay(pid, ROAD_COST);
+                        self.update_longest_road();
+                        self.check_victory();
+                    }
+                    Phase::RoadBuilding { roads_left } => {
+                        self.phase = if roads_left <= 1 || self.action_mask().count() == 0 {
+                            Phase::Main
+                        } else {
+                            Phase::RoadBuilding {
+                                roads_left: roads_left - 1,
+                            }
+                        };
+                        self.update_longest_road();
+                        self.check_victory();
+                    }
+                    _ => unreachable!(),
                 }
-
-                self.update_longest_road();
+            }
+            Action::BuildCity(v) => {
+                self.pay(pid, CITY_COST);
+                self.board.vertices[v.idx()] = Vertex::City(pid);
+                self.players[pi].cities_left -= 1;
+                self.players[pi].settlements_left += 1;
                 self.check_victory();
             }
-            _ => unreachable!(),
-        }
-    }
-
-    fn do_place_road(&mut self, e: EdgeId) {
-        let ei = e.idx();
-        match self.phase.clone() {
-            Phase::SetupRoad { player, round, .. } => {
-                self.board.edges[ei] = Edge::Road(player);
-                self.players[player.idx()].roads_left -= 1;
-                self.advance_setup(player, round);
-            }
-            Phase::Main => {
-                let pid = self.current_player;
-                self.pay(pid, ROAD_COST);
-                self.board.edges[ei] = Edge::Road(pid);
-                self.players[pid.idx()].roads_left -= 1;
-                self.update_longest_road();
+            Action::BuyDevelopmentCard => {
+                self.pay(pid, DEV_CARD_COST);
+                let card = self.board.dev_card_deck.draw().expect("deck non-empty");
+                self.players[pi].dev_cards += card;
+                self.dev_cards_bought_this_turn += card;
                 self.check_victory();
             }
-            Phase::RoadBuilding { roads_left } => {
-                let pid = self.current_player;
-                self.board.edges[ei] = Edge::Road(pid);
-                self.players[pid.idx()].roads_left -= 1;
-                if roads_left <= 1 {
-                    self.phase = Phase::Main;
-                } else {
-                    self.phase = Phase::RoadBuilding {
-                        roads_left: roads_left - 1,
-                    };
-                    if self.action_mask().is_empty() {
+            Action::PlayKnight => {
+                self.players[pi]
+                    .dev_cards
+                    .checked_sub_assign(DevelopmentCard::Knight);
+                self.players[pi].played_knights += 1;
+                self.dev_card_played_this_turn = true;
+                self.update_largest_army();
+                self.phase = Phase::MoveRobber;
+            }
+            Action::PlayRoadBuilding => {
+                self.players[pi]
+                    .dev_cards
+                    .checked_sub_assign(DevelopmentCard::RoadBuilding);
+                self.dev_card_played_this_turn = true;
+                let n = self.players[pi].roads_left.min(2);
+                if n > 0 {
+                    self.phase = Phase::RoadBuilding { roads_left: n };
+                    if self.action_mask().count() == 0 {
                         self.phase = Phase::Main;
                     }
                 }
-                self.update_longest_road();
-                self.check_victory();
             }
-            _ => unreachable!(),
+            Action::PlayYearOfPlenty(r1, r2) => {
+                self.players[pi]
+                    .dev_cards
+                    .checked_sub_assign(DevelopmentCard::YearOfPlenty);
+                self.dev_card_played_this_turn = true;
+                let g1 = 1u8.min(self.board.bank[r1]);
+                self.players[pi].resources[r1] += g1;
+                self.board.bank[r1] -= g1;
+                let g2 = 1u8.min(self.board.bank[r2]);
+                self.players[pi].resources[r2] += g2;
+                self.board.bank[r2] -= g2;
+            }
+            Action::PlayMonopoly(resource) => {
+                self.players[pi]
+                    .dev_cards
+                    .checked_sub_assign(DevelopmentCard::Monopoly);
+                self.dev_card_played_this_turn = true;
+                let mut total = 0u8;
+                for i in 0..4 {
+                    if i != pi {
+                        total += self.players[i].resources[resource];
+                        self.players[i].resources[resource] = 0;
+                    }
+                }
+                self.players[pi].resources[resource] += total;
+            }
+            Action::RollDice => {
+                self.phase = Phase::ChanceRoll;
+            }
+            Action::MoveRobber(tile) => {
+                self.board.robber = tile;
+                let mut candidates = [false; 4];
+                for &v in &topo.tile_vertices[tile.idx()] {
+                    if let Some(owner) = self.board.vertices[v as usize].owner()
+                        && owner != pid
+                        && self.players[owner.idx()].resources.total() > 0
+                    {
+                        candidates[owner.idx()] = true;
+                    }
+                }
+                self.phase = Phase::Steal { candidates };
+            }
+            Action::StealFrom(target) => {
+                let total = self.players[target.idx()].resources.total();
+                if total > 0 {
+                    let pick = rng.gen_range(0..total);
+                    let mut cum = 0u8;
+                    for r in ALL_RESOURCES {
+                        cum += self.players[target.idx()].resources[r];
+                        if pick < cum {
+                            self.players[target.idx()].resources[r] -= 1;
+                            self.players[pi].resources[r] += 1;
+                            break;
+                        }
+                    }
+                }
+                self.phase = if self.has_rolled_this_turn {
+                    Phase::Main
+                } else {
+                    Phase::PreRoll
+                };
+            }
+            Action::StealFromNone => {
+                self.phase = if self.has_rolled_this_turn {
+                    Phase::Main
+                } else {
+                    Phase::PreRoll
+                };
+            }
+            Action::DiscardResource(resource) => {
+                if let Phase::Discard {
+                    mut remaining,
+                    active,
+                } = self.phase
+                {
+                    self.players[active.idx()].resources[resource] -= 1;
+                    self.board.bank[resource] += 1;
+
+                    if self.players[active.idx()].resources.total() <= 7 {
+                        remaining[active.idx()] = false;
+                        self.phase = match remaining.iter().position(|&b| b) {
+                            None => Phase::MoveRobber,
+                            Some(next) => Phase::Discard {
+                                remaining,
+                                active: PlayerId(next as u8),
+                            },
+                        };
+                    } else {
+                        self.phase = Phase::Discard { remaining, active };
+                    }
+                }
+            }
+            Action::BankTrade { give, receive } => {
+                let rate = self.players[pi].trade_rate(give);
+                self.players[pi].resources[give] -= rate;
+                self.board.bank[give] += rate;
+                self.players[pi].resources[receive] += 1;
+                self.board.bank[receive] -= 1;
+            }
+            Action::EndTurn => {
+                self.current_player = self.current_player.next();
+                self.turn_number += 1;
+                self.dev_card_played_this_turn = false;
+                self.dev_cards_bought_this_turn = DevCardHand::EMPTY;
+                self.has_rolled_this_turn = false;
+                self.phase = Phase::PreRoll;
+            }
         }
+
+        Ok(())
     }
 
     fn advance_setup(&mut self, player: PlayerId, round: u8) {
         if round == 1 {
-            if player.0 < 3 {
-                self.phase = Phase::SetupSettlement {
+            self.phase = if player.0 < 3 {
+                Phase::SetupSettlement {
                     player: player.next(),
                     round: 1,
-                };
+                }
             } else {
-                self.phase = Phase::SetupSettlement { player, round: 2 };
-            }
+                Phase::SetupSettlement { player, round: 2 }
+            };
         } else if player.0 > 0 {
             self.phase = Phase::SetupSettlement {
                 player: player.prev(),
@@ -375,12 +453,51 @@ impl Game {
         }
     }
 
-    // ----- Dice -----
-
-    fn do_roll_dice(&mut self) {
-        self.phase = Phase::ChanceRoll;
+    fn pay(&mut self, player: PlayerId, cost: ResourceBank) {
+        for i in 0..5 {
+            self.players[player.idx()].resources.0[i] -= cost.0[i];
+            self.board.bank.0[i] += cost.0[i];
+        }
     }
 
+    fn check_victory(&mut self) {
+        if !matches!(self.phase, Phase::GameOver { .. })
+            && self.victory_points(self.current_player) >= 10
+        {
+            self.phase = Phase::GameOver {
+                winner: self.current_player,
+            };
+        }
+    }
+
+    fn update_longest_road(&mut self) {
+        for i in 0..4 {
+            let pid = PlayerId(i);
+            let len = longest_road(&self.board, pid);
+            if len >= 5 && len > self.longest_road_length {
+                self.longest_road_length = len;
+                self.longest_road_owner = Some(pid);
+            }
+        }
+    }
+
+    fn update_largest_army(&mut self) {
+        for i in 0..4 {
+            let k = self.players[i as usize].played_knights;
+            if k >= 3 && k > self.largest_army_size {
+                self.largest_army_size = k;
+                self.largest_army_owner = Some(PlayerId(i));
+            }
+        }
+        self.check_victory();
+    }
+}
+
+// =========================================================================
+// Chance node resolution
+// =========================================================================
+
+impl Game {
     pub const DICE_PROBS: [(u8, f64); 11] = [
         (2, 1.0 / 36.0),
         (3, 2.0 / 36.0),
@@ -406,21 +523,14 @@ impl Game {
         self.has_rolled_this_turn = true;
 
         if roll == 7 {
-            let mut discard_mask = PlayerMask::NONE;
-            for i in 0..4 {
-                if self.players[i].resources.total() > 7 {
-                    discard_mask.insert(PlayerId(i as u8));
-                }
-            }
-            if discard_mask.is_empty() {
-                self.phase = Phase::MoveRobber;
-            } else {
-                let first = discard_mask.first().unwrap();
-                self.phase = Phase::Discard {
-                    remaining: discard_mask,
-                    active: first,
-                };
-            }
+            let remaining = std::array::from_fn(|i| self.players[i].resources.total() > 7);
+            self.phase = match remaining.iter().position(|&b| b) {
+                None => Phase::MoveRobber,
+                Some(first) => Phase::Discard {
+                    remaining,
+                    active: PlayerId(first as u8),
+                },
+            };
         } else {
             distribute_resources(&mut self.board, roll, &mut self.players);
             self.phase = Phase::Main;
@@ -433,201 +543,12 @@ impl Game {
         self.resolve_chance(d1 + d2);
     }
 
-    // ----- Building -----
-
-    fn do_build_city(&mut self, v: VertexId) {
-        let pid = self.current_player;
-        self.pay(pid, CITY_COST);
-        self.board.vertices[v.idx()] = Vertex::City(pid);
-        self.players[pid.idx()].cities_left -= 1;
-        self.players[pid.idx()].settlements_left += 1;
-        self.check_victory();
-    }
-
-    fn do_buy_dev_card(&mut self) {
-        let pid = self.current_player;
-        self.pay(pid, DEV_CARD_COST);
-        let card = self
-            .board
-            .dev_card_deck
-            .draw()
-            .expect("deck verified non-empty");
-        self.players[pid.idx()].dev_cards.add(card);
-        self.dev_cards_bought_this_turn.add(card);
-        self.check_victory();
-    }
-
-    // ----- Dev cards -----
-
-    fn do_play_knight(&mut self) {
-        let pid = self.current_player;
-        self.players[pid.idx()]
-            .dev_cards
-            .remove(DevelopmentCard::Knight);
-        self.players[pid.idx()].played_knights += 1;
-        self.dev_card_played_this_turn = true;
-        self.update_largest_army();
-        self.phase = Phase::MoveRobber;
-    }
-
-    fn do_play_road_building(&mut self) {
-        let pid = self.current_player;
-        self.players[pid.idx()]
-            .dev_cards
-            .remove(DevelopmentCard::RoadBuilding);
-        self.dev_card_played_this_turn = true;
-        let roads_available = self.players[pid.idx()].roads_left.min(2);
-        if roads_available == 0 {
-            return;
-        }
-        self.phase = Phase::RoadBuilding {
-            roads_left: roads_available,
-        };
-        if self.action_mask().is_empty() {
-            self.phase = Phase::Main;
-        }
-    }
-
-    fn do_year_of_plenty(&mut self, r1: Resource, r2: Resource) {
-        let pid = self.current_player;
-        self.players[pid.idx()]
-            .dev_cards
-            .remove(DevelopmentCard::YearOfPlenty);
-        self.dev_card_played_this_turn = true;
-
-        let give1 = 1u8.min(self.board.bank[r1]);
-        self.players[pid.idx()].resources[r1] += give1;
-        self.board.bank[r1] -= give1;
-
-        let give2 = 1u8.min(self.board.bank[r2]);
-        self.players[pid.idx()].resources[r2] += give2;
-        self.board.bank[r2] -= give2;
-    }
-
-    fn do_monopoly(&mut self, resource: Resource) {
-        let pid = self.current_player;
-        self.players[pid.idx()]
-            .dev_cards
-            .remove(DevelopmentCard::Monopoly);
-        self.dev_card_played_this_turn = true;
-
-        let mut total = 0u8;
-        for i in 0..4 {
-            if i != pid.idx() {
-                let amount = self.players[i].resources[resource];
-                total += amount;
-                self.players[i].resources[resource] = 0;
-            }
-        }
-        self.players[pid.idx()].resources[resource] += total;
-    }
-
-    // ----- Robber / steal -----
-
-    fn do_move_robber(&mut self, tile: TileId) {
-        self.board.robber = tile;
-        let topo = &*TOPO;
-        let mut candidates = PlayerMask::NONE;
-        for &v in &topo.tile_vertices[tile.0 as usize] {
-            if let Some(owner) = self.board.vertices[v as usize].owner() {
-                if owner != self.current_player && self.players[owner.idx()].resources.total() > 0 {
-                    candidates.insert(owner);
-                }
-            }
-        }
-        self.phase = Phase::Steal { candidates };
-    }
-
-    fn do_steal(&mut self, target: PlayerId, rng: &mut impl Rng) {
-        let total = self.players[target.idx()].resources.total();
-        if total > 0 {
-            let pick = rng.gen_range(0..total);
-            let mut cumulative = 0u8;
-            for r in ALL_RESOURCES {
-                cumulative += self.players[target.idx()].resources[r];
-                if pick < cumulative {
-                    self.players[target.idx()].resources[r] -= 1;
-                    self.players[self.current_player.idx()].resources[r] += 1;
-                    break;
-                }
-            }
-        }
-        self.after_steal();
-    }
-
-    fn after_steal(&mut self) {
-        if self.has_rolled_this_turn {
-            self.phase = Phase::Main;
-        } else {
-            self.phase = Phase::PreRoll;
-        }
-    }
-
-    // ----- Discard -----
-
-    fn do_discard(&mut self, resource: Resource) {
-        if let Phase::Discard {
-            mut remaining,
-            active,
-        } = self.phase
-        {
-            self.players[active.idx()].resources[resource] -= 1;
-            self.board.bank[resource] += 1;
-
-            if self.players[active.idx()].resources.total() <= 7 {
-                remaining.remove(active);
-                if remaining.is_empty() {
-                    self.phase = Phase::MoveRobber;
-                } else {
-                    let next = remaining.first().unwrap();
-                    self.phase = Phase::Discard {
-                        remaining,
-                        active: next,
-                    };
-                }
-            } else {
-                self.phase = Phase::Discard { remaining, active };
-            }
-        }
-    }
-
-    // ----- Trading -----
-
-    fn do_bank_trade(&mut self, give: Resource, receive: Resource) {
-        let pid = self.current_player;
-        let rate = self.players[pid.idx()].trade_rate(give);
-        self.players[pid.idx()].resources[give] -= rate;
-        self.board.bank[give] += rate;
-        self.players[pid.idx()].resources[receive] += 1;
-        self.board.bank[receive] -= 1;
-    }
-
-    // ----- End turn -----
-
-    fn do_end_turn(&mut self) {
-        self.current_player = self.current_player.next();
-        self.turn_number += 1;
-        self.dev_card_played_this_turn = false;
-        self.dev_cards_bought_this_turn = DevCardHand::EMPTY;
-        self.has_rolled_this_turn = false;
-        self.phase = Phase::PreRoll;
-    }
-
-    // ----- Helpers -----
-
-    fn pay(&mut self, player: PlayerId, cost: ResourceBank) {
-        for i in 0..5 {
-            self.players[player.idx()].resources.0[i] -= cost.0[i];
-            self.board.bank.0[i] += cost.0[i];
-        }
-    }
-
     pub fn victory_points(&self, player: PlayerId) -> u8 {
         let mut vp = 0u8;
         for v in &self.board.vertices {
             match v {
-                Vertex::Settlement(pid) if *pid == player => vp += 1,
-                Vertex::City(pid) if *pid == player => vp += 2,
+                Vertex::Settlement(p) if *p == player => vp += 1,
+                Vertex::City(p) if *p == player => vp += 2,
                 _ => {}
             }
         }
@@ -637,71 +558,27 @@ impl Game {
         if self.largest_army_owner == Some(player) {
             vp += 2;
         }
-        vp += self.players[player.idx()]
-            .dev_cards
-            .get(DevelopmentCard::VictoryPoint);
+        vp += self.players[player.idx()].dev_cards[DevelopmentCard::VictoryPoint];
         vp
-    }
-
-    fn check_victory(&mut self) {
-        if matches!(self.phase, Phase::GameOver { .. }) {
-            return;
-        }
-        if self.victory_points(self.current_player) >= 10 {
-            self.phase = Phase::GameOver {
-                winner: self.current_player,
-            };
-        }
-    }
-
-    fn update_longest_road(&mut self) {
-        let mut best_len = self.longest_road_length;
-        let mut best_owner = self.longest_road_owner;
-        for i in 0..4 {
-            let pid = PlayerId(i);
-            let len = longest_road(&self.board, pid);
-            if len >= 5 && len > best_len {
-                best_len = len;
-                best_owner = Some(pid);
-            }
-        }
-        self.longest_road_length = best_len;
-        self.longest_road_owner = best_owner;
-    }
-
-    fn update_largest_army(&mut self) {
-        for i in 0..4 {
-            let pid = PlayerId(i);
-            let knights = self.players[i as usize].played_knights;
-            if knights >= 3 && knights > self.largest_army_size {
-                self.largest_army_size = knights;
-                self.largest_army_owner = Some(pid);
-            }
-        }
-        self.check_victory();
     }
 }
 
 // =========================================================================
-// Game rules (pure functions on board state)
+// Game rules
 // =========================================================================
 
-fn distribute_resources(
-    board: &mut crate::board::Board,
-    roll: u8,
-    players: &mut [crate::player::Player; 4],
-) {
+fn distribute_resources(board: &mut crate::board::Board, roll: u8, players: &mut [Player; 4]) {
     let topo = &*TOPO;
-    for t in 0..19u8 {
-        let tile = &board.tiles[t as usize];
-        if tile.number != roll || board.robber == TileId(t) {
+    for t in 0..NUM_TILES {
+        let tile = &board.tiles[t];
+        if tile.number != roll || board.robber == TileId(t as u8) {
             continue;
         }
         let resource = match tile.terrain.resource() {
             Some(r) => r,
             None => continue,
         };
-        for &v in &topo.tile_vertices[t as usize] {
+        for &v in &topo.tile_vertices[t] {
             let (pid, amount) = match board.vertices[v as usize] {
                 Vertex::Settlement(pid) => (pid, 1u8),
                 Vertex::City(pid) => (pid, 2u8),
@@ -720,24 +597,15 @@ pub fn longest_road(board: &crate::board::Board, player: PlayerId) -> u8 {
     let topo = &*TOPO;
     let mut best = 0u8;
     let mut visited = [false; NUM_EDGES];
-
-    for start_edge in 0..NUM_EDGES {
-        if board.edges[start_edge].owner() != Some(player) {
+    for start in 0..NUM_EDGES {
+        if board.edges[start].owner() != Some(player) {
             continue;
         }
-        visited[start_edge] = true;
-        for &endpoint in &topo.edge_vertices[start_edge] {
-            dfs_road(
-                board,
-                player,
-                endpoint as usize,
-                1,
-                &mut visited,
-                &mut best,
-                topo,
-            );
+        visited[start] = true;
+        for &ep in &topo.edge_vertices[start] {
+            dfs_road(board, player, ep as usize, 1, &mut visited, &mut best, topo);
         }
-        visited[start_edge] = false;
+        visited[start] = false;
     }
     best
 }
@@ -764,13 +632,31 @@ fn dfs_road(
             continue;
         }
         let [v1, v2] = topo.edge_vertices[e];
-        let next_v = if v1 as usize == vertex {
+        let next = if v1 as usize == vertex {
             v2 as usize
         } else {
             v1 as usize
         };
         visited[e] = true;
-        dfs_road(board, player, next_v, depth + 1, visited, best, topo);
+        dfs_road(board, player, next, depth + 1, visited, best, topo);
         visited[e] = false;
     }
 }
+
+// =========================================================================
+// Error
+// =========================================================================
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvalidAction {
+    pub action: Action,
+    pub reason: &'static str,
+}
+
+impl std::fmt::Display for InvalidAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "invalid action {:?}: {}", self.action, self.reason)
+    }
+}
+
+impl std::error::Error for InvalidAction {}

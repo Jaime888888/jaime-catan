@@ -52,14 +52,27 @@ impl Action {
             Action::BuyDevelopmentCard => 180,
             Action::PlayKnight => 181,
             Action::PlayRoadBuilding => 182,
-            Action::PlayYearOfPlenty(r1, r2) => 183 + yop_pair_index(r1, r2),
+            Action::PlayYearOfPlenty(r1, r2) => {
+                let (a, b) = if (r1 as usize) <= (r2 as usize) {
+                    (r1 as usize, r2 as usize)
+                } else {
+                    (r2 as usize, r1 as usize)
+                };
+                let row_offset = [0, 5, 9, 12, 14][a];
+                183 + row_offset + (b - a)
+            }
             Action::PlayMonopoly(r) => 198 + r as usize,
             Action::RollDice => 203,
             Action::MoveRobber(TileId(tid)) => 204 + tid as usize,
             Action::StealFrom(PlayerId(pid)) => 223 + pid as usize,
             Action::StealFromNone => 227,
             Action::DiscardResource(r) => 228 + r as usize,
-            Action::BankTrade { give, receive } => 233 + bank_trade_index(give, receive),
+            Action::BankTrade { give, receive } => {
+                let g = give as usize;
+                let r = receive as usize;
+                let r_adj = if r > g { r - 1 } else { r };
+                233 + g * 4 + r_adj
+            }
             Action::EndTurn => 253,
         }
     }
@@ -73,8 +86,19 @@ impl Action {
             181 => Action::PlayKnight,
             182 => Action::PlayRoadBuilding,
             183..198 => {
-                let (r1, r2) = yop_pair_from_index(i - 183);
-                Action::PlayYearOfPlenty(r1, r2)
+                let idx = i - 183;
+                let (a, local) = if idx < 5 {
+                    (0, idx)
+                } else if idx < 9 {
+                    (1, idx - 5)
+                } else if idx < 12 {
+                    (2, idx - 9)
+                } else if idx < 14 {
+                    (3, idx - 12)
+                } else {
+                    (4, 0)
+                };
+                Action::PlayYearOfPlenty(Resource::ALL[a], Resource::ALL[a + local])
             }
             198..203 => Action::PlayMonopoly(Resource::ALL[i - 198]),
             203 => Action::RollDice,
@@ -83,52 +107,19 @@ impl Action {
             227 => Action::StealFromNone,
             228..233 => Action::DiscardResource(Resource::ALL[i - 228]),
             233..253 => {
-                let (give, receive) = bank_trade_from_index(i - 233);
-                Action::BankTrade { give, receive }
+                let idx = i - 233;
+                let g = idx / 4;
+                let r_adj = idx % 4;
+                let r = if r_adj >= g { r_adj + 1 } else { r_adj };
+                Action::BankTrade {
+                    give: Resource::ALL[g],
+                    receive: Resource::ALL[r],
+                }
             }
             253 => Action::EndTurn,
             _ => panic!("invalid action index {i}"),
         }
     }
-}
-
-fn yop_pair_index(r1: Resource, r2: Resource) -> usize {
-    let (a, b) = if (r1 as usize) <= (r2 as usize) {
-        (r1 as usize, r2 as usize)
-    } else {
-        (r2 as usize, r1 as usize)
-    };
-    let row_offset = [0, 5, 9, 12, 14][a];
-    row_offset + (b - a)
-}
-
-fn yop_pair_from_index(idx: usize) -> (Resource, Resource) {
-    let (a, local) = if idx < 5 {
-        (0, idx)
-    } else if idx < 9 {
-        (1, idx - 5)
-    } else if idx < 12 {
-        (2, idx - 9)
-    } else if idx < 14 {
-        (3, idx - 12)
-    } else {
-        (4, 0)
-    };
-    (Resource::ALL[a], Resource::ALL[a + local])
-}
-
-fn bank_trade_index(give: Resource, receive: Resource) -> usize {
-    let g = give as usize;
-    let r = receive as usize;
-    let r_adj = if r > g { r - 1 } else { r };
-    g * 4 + r_adj
-}
-
-fn bank_trade_from_index(idx: usize) -> (Resource, Resource) {
-    let g = idx / 4;
-    let r_adj = idx % 4;
-    let r = if r_adj >= g { r_adj + 1 } else { r_adj };
-    (Resource::ALL[g], Resource::ALL[r])
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

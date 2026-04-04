@@ -424,6 +424,7 @@ impl<'a> PlayerTurn<'a> {
 impl<'a> ChanceTurn<'a> {
     pub fn resolve(self, roll: u8) {
         assert!((2..=12).contains(&roll));
+
         let topo = &*TOPO;
         self.game.turn_flags.has_rolled = true;
 
@@ -433,6 +434,7 @@ impl<'a> ChanceTurn<'a> {
                 let total = self.game.players[i].resources.total();
                 total.div_ceil(2)
             });
+
             self.game.phase = match remaining.iter().position(|&b| b) {
                 None => Phase::MoveRobber,
                 Some(first) => Phase::Discard {
@@ -450,6 +452,7 @@ impl<'a> ChanceTurn<'a> {
                 let Some(resource) = tile.terrain.resource() else {
                     continue;
                 };
+
                 for &v in &topo.tile_vertices[t] {
                     let (pid, amount) = match self.game.board.vertices[v as usize] {
                         Vertex::Settlement(pid) => (pid, 1u8),
@@ -476,10 +479,12 @@ impl<'a> ChanceTurn<'a> {
 impl Game {
     fn legal_road_placements(&self, player: PlayerId, mask: &mut ActionMask) {
         let topo = &*TOPO;
+
         for e in 0..NUM_EDGES {
             if !self.board.edges[e].is_empty() {
                 continue;
             }
+
             let [v1, v2] = topo.edge_vertices[e];
             if self.board.vertex_road_accessible(v1 as usize, player)
                 || self.board.vertex_road_accessible(v2 as usize, player)
@@ -491,6 +496,7 @@ impl Game {
 
     fn has_legal_road(&self, player: PlayerId) -> bool {
         let topo = &*TOPO;
+
         (0..NUM_EDGES).any(|e| {
             self.board.edges[e].is_empty() && {
                 let [v1, v2] = topo.edge_vertices[e];
@@ -504,6 +510,7 @@ impl Game {
         if card == DevelopmentCard::VictoryPoint || self.turn_flags.dev_card_played {
             return false;
         }
+
         self.players[self.current_player.idx()].dev_cards[card]
             > self.turn_flags.dev_cards_bought[card]
     }

@@ -13,7 +13,7 @@ pub enum PlayerRelation {
     Clockwise3 = 3,
 }
 
-fn rel(observer: PlayerId, other: PlayerId) -> PlayerRelation {
+fn player_relative(observer: PlayerId, other: PlayerId) -> PlayerRelation {
     match (other.0 + 4 - observer.0) % 4 {
         0 => PlayerRelation::Self_,
         1 => PlayerRelation::Clockwise1,
@@ -106,22 +106,8 @@ impl Observation {
 fn vertex_byte(game: &Game, perspective: PlayerId, v: usize) -> u8 {
     match game.board.vertices[v] {
         Vertex::Empty => 0,
-        Vertex::Settlement(p) => 1 + rel(perspective, p) as u8,
-        Vertex::City(p) => 5 + rel(perspective, p) as u8,
-    }
-}
-
-fn road_byte(game: &Game, perspective: PlayerId, e: usize) -> u8 {
-    match game.board.edges[e] {
-        Edge::Empty => 0,
-        Edge::Road(p) => 1 + rel(perspective, p) as u8,
-    }
-}
-
-fn harbor_port_byte(p: Port) -> u8 {
-    match p {
-        Port::ThreeToOne => 0,
-        Port::TwoToOne(r) => 1 + r as u8,
+        Vertex::Settlement(p) => 1 + player_relative(perspective, p) as u8,
+        Vertex::City(p) => 5 + player_relative(perspective, p) as u8,
     }
 }
 
@@ -142,9 +128,15 @@ impl Game {
                 }
             }),
             vertices: std::array::from_fn(|v| vertex_byte(self, perspective, v)),
-            edges: std::array::from_fn(|e| road_byte(self, perspective, e)),
+            edges: std::array::from_fn(|e| match self.board.edges[e] {
+                Edge::Empty => 0,
+                Edge::Road(p) => 1 + player_relative(perspective, p) as u8,
+            }),
             harbors: std::array::from_fn(|i| ObsHarbor {
-                port_kind: harbor_port_byte(self.board.harbors[i]),
+                port_kind: match self.board.harbors[i] {
+                    Port::ThreeToOne => 0,
+                    Port::TwoToOne(r) => 1 + r as u8,
+                },
                 adjacent_vertex_a: topo.port_vertices[i][0],
                 adjacent_vertex_b: topo.port_vertices[i][1],
             }),
@@ -169,7 +161,7 @@ impl Game {
                 let pid = PlayerId(((perspective.0 as usize + 1 + i) % 4) as u8);
                 let op = &self.players[pid.idx()];
                 ObsOther {
-                    relation: rel(perspective, pid) as u8,
+                    relation: player_relative(perspective, pid) as u8,
                     total_resource_cards: op.resources.total(),
                     total_dev_cards: op.dev_cards.total(),
                     played_knights: op.played_knights,

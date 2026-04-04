@@ -41,6 +41,8 @@ pub struct Topology {
     pub tile_vertices: [[u8; 6]; NUM_TILES],
     pub edge_vertices: [[u8; 2]; NUM_EDGES],
     pub port_vertices: [[u8; 2]; NUM_PORTS],
+    /// Canonical layout-plane coordinates `(vx, vy)` per vertex id (same keys as in `LazyLock` builder).
+    pub vertex_pos: [(i8, i8); NUM_VERTICES],
 
     vertex_tiles: [InlineVec<3>; NUM_VERTICES],
     vertex_adjacent: [InlineVec<3>; NUM_VERTICES],
@@ -192,6 +194,7 @@ pub static TOPO: LazyLock<Topology> = LazyLock::new(|| {
         tile_vertices,
         edge_vertices,
         port_vertices,
+        vertex_pos,
         vertex_tiles,
         vertex_adjacent,
         vertex_edges,
@@ -372,7 +375,7 @@ impl Board {
             robber,
             harbors,
             bank: STANDARD_BANK,
-            dev_card_deck: DevCardDeck(dev_card_deck, NUM_DEV_CARDS - 1),
+            dev_card_deck: DevCardDeck(dev_card_deck, NUM_DEV_CARDS),
         }
     }
 }

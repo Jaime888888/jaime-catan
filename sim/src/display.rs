@@ -173,10 +173,10 @@ fn player_piece_inline(game: &Game, pid: PlayerId) -> String {
     }
     let mut roads_on_board = 0u8;
     for e in &game.board.edges {
-        if let Edge::Road(p) = e {
-            if *p == pid {
-                roads_on_board += 1;
-            }
+        if let Edge::Road(p) = e
+            && *p == pid
+        {
+            roads_on_board += 1;
         }
     }
     let pl = &game.players[pid.idx()];

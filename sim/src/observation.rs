@@ -1,7 +1,6 @@
 use crate::board::{
     DevelopmentCard, Edge, NUM_EDGES, NUM_PORTS, NUM_TILES, NUM_VERTICES, Port, TOPO, Vertex,
 };
-use crate::transition::longest_road;
 use crate::{Game, PlayerId, TileId};
 use std::mem::{align_of, size_of};
 
@@ -157,7 +156,7 @@ impl Game {
                     played_knights: p.played_knights,
                     victory_points: self.victory_points(perspective),
                     has_longest_road: (self.longest_road_owner() == Some(perspective)) as u8,
-                    longest_road_length: longest_road(&self.board, perspective),
+                    longest_road_length: self.longest_road_len[perspective.idx()],
                     has_largest_army: (self.largest_army_owner() == Some(perspective)) as u8,
                     settlements_left: p.settlements_left,
                     cities_left: p.cities_left,

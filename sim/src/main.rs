@@ -17,7 +17,7 @@ fn main() {
             Turn::Terminal => break,
             Turn::Chance(chance) => chance.resolve_random(&mut rng),
             Turn::Player(turn) => {
-                let actions = turn.actions();
+                let actions = turn.mask.actions().collect::<Vec<_>>();
                 let idx = rng.gen_range(0..actions.len());
                 let action = actions[idx];
                 turn.apply(action, &mut rng).unwrap();

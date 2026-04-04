@@ -6,7 +6,7 @@ pub mod transition;
 
 use core::fmt;
 
-pub use action::{ACTION_SPACE_SIZE, Action, ActionMask};
+pub use action::{ACTION_SPACE_SIZE, Action, ActionMask, ActionMaskIter};
 pub use board::{Board, Resource, TOPO, Terrain};
 pub use observation::{OBSERVATION_LEN, Observation};
 pub use transition::{ChanceTurn, InvalidAction, PlayerTurn, Turn};
@@ -83,6 +83,7 @@ pub struct Game {
     pub players: [Player; 4],
     pub phase: Phase,
     pub turn_flags: TurnFlags,
+    pub longest_road_len: [u8; 4],
     pub current_player: PlayerId,
     pub turn_number: u16,
 }
@@ -101,9 +102,10 @@ impl Game {
                 player: PlayerId::P0,
                 round: 1,
             },
+            turn_flags: TurnFlags::default(),
+            longest_road_len: [0; 4],
             current_player: PlayerId::P0,
             turn_number: 0,
-            turn_flags: TurnFlags::default(),
         }
     }
 

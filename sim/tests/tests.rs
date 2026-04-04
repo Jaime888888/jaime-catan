@@ -32,8 +32,15 @@ fn action_mask_set_get_iter() {
     assert!(m.get(100));
     assert!(m.get(253));
     assert!(!m.get(1));
-    let items: Vec<_> = m.iter().collect();
-    assert_eq!(items, vec![0, 100, 253]);
+    let items: Vec<_> = m.actions().collect();
+    assert_eq!(
+        items,
+        vec![
+            Action::from_index(0),
+            Action::from_index(100),
+            Action::from_index(253),
+        ]
+    );
 }
 
 // =========================================================================
@@ -123,7 +130,7 @@ fn setup_produces_8_settlements_8_roads() {
     while !matches!(game.phase, catan_sim::Phase::PreRoll) {
         match game.turn() {
             Turn::Player(turn) => {
-                let actions = turn.actions();
+                let actions: Vec<_> = turn.mask.actions().collect();
                 turn.apply(actions[0], &mut rng).unwrap();
             }
             _ => panic!("unexpected phase during setup"),
@@ -154,7 +161,7 @@ fn setup_round2_gives_resources() {
     while !matches!(game.phase, catan_sim::Phase::PreRoll) {
         match game.turn() {
             Turn::Player(turn) => {
-                let actions = turn.actions();
+                let actions: Vec<_> = turn.mask.actions().collect();
                 turn.apply(actions[0], &mut rng).unwrap();
             }
             _ => panic!("unexpected phase during setup"),
@@ -181,8 +188,8 @@ fn discard_halves_hand() {
     while !matches!(game.phase, catan_sim::Phase::PreRoll) {
         match game.turn() {
             Turn::Player(turn) => {
-                let action = turn.actions()[0];
-                turn.apply(action, &mut rng).unwrap();
+                let actions: Vec<_> = turn.mask.actions().collect();
+                turn.apply(actions[0], &mut rng).unwrap();
             }
             _ => panic!(),
         }
@@ -208,8 +215,8 @@ fn discard_halves_hand() {
     while matches!(game.phase, catan_sim::Phase::Discard { .. }) {
         match game.turn() {
             Turn::Player(turn) => {
-                let action = turn.actions()[0];
-                turn.apply(action, &mut rng).unwrap();
+                let actions: Vec<_> = turn.mask.actions().collect();
+                turn.apply(actions[0], &mut rng).unwrap();
             }
             _ => panic!(),
         }
@@ -237,7 +244,7 @@ fn random_games_complete_without_panic() {
                 Turn::Terminal => break,
                 Turn::Chance(c) => c.resolve_random(&mut rng),
                 Turn::Player(turn) => {
-                    let actions = turn.actions();
+                    let actions: Vec<_> = turn.mask.actions().collect();
                     assert!(
                         !actions.is_empty(),
                         "seed={seed} step={steps}: no legal actions"
@@ -265,7 +272,7 @@ fn action_mask_matches_legal_actions() {
             Turn::Chance(c) => c.resolve_random(&mut rng),
             Turn::Player(turn) => {
                 let mask = turn.mask;
-                let actions = turn.actions();
+                let actions: Vec<_> = mask.actions().collect();
                 for &a in &actions {
                     assert!(mask.get(a.to_index()), "{a:?} in actions but not mask");
                 }
@@ -292,7 +299,7 @@ fn observation_stable_across_perspectives() {
             Turn::Terminal => break,
             Turn::Chance(c) => c.resolve_random(&mut rng),
             Turn::Player(turn) => {
-                let actions = turn.actions();
+                let actions: Vec<_> = turn.mask.actions().collect();
                 turn.apply(actions[rng.gen_range(0..actions.len())], &mut rng)
                     .unwrap();
             }
@@ -319,7 +326,7 @@ fn victory_points_consistent() {
             Turn::Terminal => break,
             Turn::Chance(c) => c.resolve_random(&mut rng),
             Turn::Player(turn) => {
-                let actions = turn.actions();
+                let actions: Vec<_> = turn.mask.actions().collect();
                 turn.apply(actions[rng.gen_range(0..actions.len())], &mut rng)
                     .unwrap();
             }
@@ -353,7 +360,7 @@ fn playout_throughput() {
                 Turn::Terminal => break,
                 Turn::Chance(c) => c.resolve_random(&mut rng),
                 Turn::Player(turn) => {
-                    let actions = turn.actions();
+                    let actions: Vec<_> = turn.mask.actions().collect();
                     if actions.is_empty() {
                         break;
                     }
@@ -390,7 +397,7 @@ fn clone_and_diverge() {
             Turn::Terminal => return,
             Turn::Chance(c) => c.resolve_random(&mut rng),
             Turn::Player(turn) => {
-                let actions = turn.actions();
+                let actions: Vec<_> = turn.mask.actions().collect();
                 turn.apply(actions[rng.gen_range(0..actions.len())], &mut rng)
                     .unwrap();
             }
@@ -408,7 +415,7 @@ fn clone_and_diverge() {
                 Turn::Terminal => continue,
                 Turn::Chance(c) => c.resolve_random(r),
                 Turn::Player(turn) => {
-                    let actions = turn.actions();
+                    let actions: Vec<_> = turn.mask.actions().collect();
                     turn.apply(actions[r.gen_range(0..actions.len())], r)
                         .unwrap();
                 }

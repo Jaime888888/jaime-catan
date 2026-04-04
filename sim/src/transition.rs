@@ -3,7 +3,7 @@ use rand::Rng;
 use crate::action::{Action, ActionMask};
 use crate::board::{
     Board, DevelopmentCard, Edge, NUM_EDGES, NUM_TILES, NUM_VERTICES, Resource, ResourceBank, TOPO,
-    Topology, Vertex,
+    Vertex,
 };
 use crate::{EdgeId, Game, Phase, PlayerId, TileId, TurnFlags, VertexId};
 
@@ -181,10 +181,6 @@ impl Game {
 }
 
 impl<'a> PlayerTurn<'a> {
-    pub fn actions(&self) -> Vec<Action> {
-        self.mask.iter().map(Action::from_index).collect()
-    }
-
     pub fn apply(self, action: Action, rng: &mut impl Rng) -> Result<(), InvalidAction> {
         if !self.mask.get(action.to_index()) {
             return Err(InvalidAction {
@@ -231,6 +227,7 @@ impl<'a> PlayerTurn<'a> {
                     }
                     _ => unreachable!(),
                 }
+                game.compute_longest_road();
             }
             Action::PlaceRoad(e) => {
                 game.board.edges[e.idx()] = Edge::Road(pid);
@@ -272,12 +269,14 @@ impl<'a> PlayerTurn<'a> {
                     }
                     _ => unreachable!(),
                 }
+                game.compute_longest_road();
             }
             Action::BuildCity(v) => {
                 game.pay(pid, CITY_COST);
                 game.board.vertices[v.idx()] = Vertex::City(pid);
                 game.players[pi].cities_left -= 1;
                 game.players[pi].settlements_left += 1;
+                game.compute_longest_road();
                 game.check_victory();
             }
             Action::BuyDevelopmentCard => {
@@ -526,12 +525,36 @@ impl Game {
         }
     }
 
+    fn compute_longest_road(&mut self) {
+        let topo = &*TOPO;
+
+        for i in 0..4 {
+            let player = PlayerId(i as u8);
+            let mut best = 0u8;
+            let mut visited = [false; NUM_EDGES];
+
+            for start in 0..NUM_EDGES {
+                if self.board.edges[start].owner() != Some(player) {
+                    continue;
+                }
+
+                visited[start] = true;
+                for &ep in &topo.edge_vertices[start] {
+                    dfs_road(&self.board, player, ep as usize, 1, &mut visited, &mut best);
+                }
+                visited[start] = false;
+            }
+
+            self.longest_road_len[i] = best;
+        }
+    }
+
     pub fn longest_road_owner(&self) -> Option<PlayerId> {
         let mut best_len = 0u8;
         let mut best_pid = None;
-        for i in 0..4 {
-            let pid = PlayerId(i);
-            let len = longest_road(&self.board, pid);
+        for i in 0..4usize {
+            let pid = PlayerId(i as u8);
+            let len = self.longest_road_len[i];
             if len >= 5 && len > best_len {
                 best_len = len;
                 best_pid = Some(pid);
@@ -579,26 +602,6 @@ impl Game {
     }
 }
 
-pub fn longest_road(board: &Board, player: PlayerId) -> u8 {
-    let topo = &*TOPO;
-    let mut best = 0u8;
-    let mut visited = [false; NUM_EDGES];
-
-    for start in 0..NUM_EDGES {
-        if board.edges[start].owner() != Some(player) {
-            continue;
-        }
-
-        visited[start] = true;
-        for &ep in &topo.edge_vertices[start] {
-            dfs_road(board, player, ep as usize, 1, &mut visited, &mut best, topo);
-        }
-        visited[start] = false;
-    }
-
-    best
-}
-
 fn dfs_road(
     board: &Board,
     player: PlayerId,
@@ -606,11 +609,12 @@ fn dfs_road(
     depth: u8,
     visited: &mut [bool; NUM_EDGES],
     best: &mut u8,
-    topo: &Topology,
 ) {
     if depth > *best {
         *best = depth;
     }
+
+    let topo = &*TOPO;
 
     match board.vertices[vertex] {
         Vertex::Settlement(p) | Vertex::City(p) if p != player => return,
@@ -631,7 +635,7 @@ fn dfs_road(
         };
 
         visited[e] = true;
-        dfs_road(board, player, next, depth + 1, visited, best, topo);
+        dfs_road(board, player, next, depth + 1, visited, best);
         visited[e] = false;
     }
 }

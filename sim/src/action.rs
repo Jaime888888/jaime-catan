@@ -151,35 +151,58 @@ impl ActionMask {
         self.bits.iter().map(|b| b.count_ones()).sum()
     }
 
-    pub fn iter(self) -> impl Iterator<Item = usize> {
-        let bits = self.bits;
-        let mut pos = 0;
-
-        std::iter::from_fn(move || {
-            while pos < ACTION_SPACE_SIZE {
-                let chunk = pos / 64;
-                let bit = pos % 64;
-                if chunk >= 4 {
-                    return None;
-                }
-                let word = bits[chunk] >> bit;
-                if word == 0 {
-                    pos = (chunk + 1) * 64;
-                    continue;
-                }
-                let tz = word.trailing_zeros() as usize;
-                let idx = pos + tz;
-                if idx >= ACTION_SPACE_SIZE {
-                    return None;
-                }
-                pos = idx + 1;
-                return Some(idx);
-            }
-            None
-        })
-    }
-
     pub fn set_action(&mut self, action: Action) {
         self.set(action.to_index());
     }
+
+    pub fn actions(self) -> ActionMaskIter {
+        ActionMaskIter {
+            bits: self.bits,
+            pos: 0,
+            remaining: self.count(),
+        }
+    }
 }
+
+#[derive(Clone, Debug)]
+pub struct ActionMaskIter {
+    bits: [u64; 4],
+    pos: usize,
+    remaining: u32,
+}
+
+impl Iterator for ActionMaskIter {
+    type Item = Action;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.pos < ACTION_SPACE_SIZE {
+            let chunk = self.pos / 64;
+            let bit = self.pos % 64;
+            if chunk >= 4 {
+                return None;
+            }
+            let word = self.bits[chunk] >> bit;
+            if word == 0 {
+                self.pos = (chunk + 1) * 64;
+                continue;
+            }
+            let tz = word.trailing_zeros() as usize;
+            let idx = self.pos + tz;
+            if idx >= ACTION_SPACE_SIZE {
+                self.pos = idx + 1;
+                continue;
+            }
+            self.pos = idx + 1;
+            self.remaining -= 1;
+            return Some(Action::from_index(idx));
+        }
+        None
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let r = self.remaining as usize;
+        (r, Some(r))
+    }
+}
+
+impl ExactSizeIterator for ActionMaskIter {}

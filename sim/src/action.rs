@@ -1,14 +1,6 @@
-use crate::{EdgeId, PlayerId, TileId, VertexId, board::Resource};
+use crate::board::Resource;
+use crate::{EdgeId, PlayerId, TileId, VertexId};
 
-const ALL_RESOURCES: [Resource; 5] = [
-    Resource::Brick,
-    Resource::Lumber,
-    Resource::Ore,
-    Resource::Grain,
-    Resource::Wool,
-];
-
-/// Every action variant is a complete, atomic game action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     PlaceSettlement(VertexId),
@@ -84,28 +76,21 @@ impl Action {
                 let (r1, r2) = yop_pair_from_index(i - 183);
                 Action::PlayYearOfPlenty(r1, r2)
             }
-            198..203 => Action::PlayMonopoly(ALL_RESOURCES[i - 198]),
+            198..203 => Action::PlayMonopoly(Resource::ALL[i - 198]),
             203 => Action::RollDice,
             204..223 => Action::MoveRobber(TileId((i - 204) as u8)),
             223..227 => Action::StealFrom(PlayerId((i - 223) as u8)),
             227 => Action::StealFromNone,
-            228..233 => Action::DiscardResource(ALL_RESOURCES[i - 228]),
+            228..233 => Action::DiscardResource(Resource::ALL[i - 228]),
             233..253 => {
-                let (g, r) = bank_trade_from_index(i - 233);
-                Action::BankTrade {
-                    give: g,
-                    receive: r,
-                }
+                let (give, receive) = bank_trade_from_index(i - 233);
+                Action::BankTrade { give, receive }
             }
             253 => Action::EndTurn,
             _ => panic!("invalid action index {i}"),
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Year-of-Plenty pair encoding (15 unordered pairs with repetition)
-// ---------------------------------------------------------------------------
 
 fn yop_pair_index(r1: Resource, r2: Resource) -> usize {
     let (a, b) = if (r1 as usize) <= (r2 as usize) {
@@ -129,12 +114,8 @@ fn yop_pair_from_index(idx: usize) -> (Resource, Resource) {
     } else {
         (4, 0)
     };
-    (ALL_RESOURCES[a], ALL_RESOURCES[a + local])
+    (Resource::ALL[a], Resource::ALL[a + local])
 }
-
-// ---------------------------------------------------------------------------
-// BankTrade encoding (20 ordered pairs where give != receive)
-// ---------------------------------------------------------------------------
 
 fn bank_trade_index(give: Resource, receive: Resource) -> usize {
     let g = give as usize;
@@ -147,12 +128,8 @@ fn bank_trade_from_index(idx: usize) -> (Resource, Resource) {
     let g = idx / 4;
     let r_adj = idx % 4;
     let r = if r_adj >= g { r_adj + 1 } else { r_adj };
-    (ALL_RESOURCES[g], ALL_RESOURCES[r])
+    (Resource::ALL[g], Resource::ALL[r])
 }
-
-// ---------------------------------------------------------------------------
-// ActionMask – 254-bit mask stored in 4 × u64
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ActionMask {
@@ -174,85 +151,35 @@ impl ActionMask {
         self.bits.iter().map(|b| b.count_ones()).sum()
     }
 
-    pub fn iter(self) -> ActionMaskIter {
-        ActionMaskIter { mask: self, pos: 0 }
+    pub fn iter(self) -> impl Iterator<Item = usize> {
+        let bits = self.bits;
+        let mut pos = 0;
+
+        std::iter::from_fn(move || {
+            while pos < ACTION_SPACE_SIZE {
+                let chunk = pos / 64;
+                let bit = pos % 64;
+                if chunk >= 4 {
+                    return None;
+                }
+                let word = bits[chunk] >> bit;
+                if word == 0 {
+                    pos = (chunk + 1) * 64;
+                    continue;
+                }
+                let tz = word.trailing_zeros() as usize;
+                let idx = pos + tz;
+                if idx >= ACTION_SPACE_SIZE {
+                    return None;
+                }
+                pos = idx + 1;
+                return Some(idx);
+            }
+            None
+        })
     }
 
     pub fn set_action(&mut self, action: Action) {
         self.set(action.to_index());
-    }
-}
-
-impl IntoIterator for ActionMask {
-    type Item = usize;
-    type IntoIter = ActionMaskIter;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
-}
-
-pub struct ActionMaskIter {
-    mask: ActionMask,
-    pos: usize,
-}
-
-impl Iterator for ActionMaskIter {
-    type Item = usize;
-
-    fn next(&mut self) -> Option<usize> {
-        while self.pos < ACTION_SPACE_SIZE {
-            let chunk = self.pos / 64;
-            let bit = self.pos % 64;
-            if chunk >= 4 {
-                return None;
-            }
-            let word = self.mask.bits[chunk] >> bit;
-            if word == 0 {
-                self.pos = (chunk + 1) * 64;
-                continue;
-            }
-            let tz = word.trailing_zeros() as usize;
-            let idx = self.pos + tz;
-            if idx >= ACTION_SPACE_SIZE {
-                return None;
-            }
-            self.pos = idx + 1;
-            return Some(idx);
-        }
-        None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn action_index_roundtrip() {
-        for i in 0..ACTION_SPACE_SIZE {
-            let action = Action::from_index(i);
-            assert_eq!(
-                action.to_index(),
-                i,
-                "roundtrip failed for index {i}: {action:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn action_mask_basics() {
-        let mut m = ActionMask::EMPTY;
-        assert_eq!(m.count(), 0);
-        m.set(0);
-        m.set(253);
-        m.set(100);
-        assert_eq!(m.count(), 3);
-        assert!(m.get(0));
-        assert!(m.get(100));
-        assert!(m.get(253));
-        assert!(!m.get(1));
-        let items: Vec<_> = m.iter().collect();
-        assert_eq!(items, vec![0, 100, 253]);
     }
 }

@@ -1,5 +1,6 @@
 pub mod action;
 pub mod board;
+pub mod display;
 pub mod observation;
 pub mod transition;
 
@@ -7,6 +8,8 @@ use core::fmt;
 
 pub use action::{ACTION_SPACE_SIZE, Action, ActionMask};
 pub use board::{Board, Resource, TOPO, Terrain};
+pub use observation::{OBSERVATION_LEN, Observation};
+pub use transition::{ChanceTurn, InvalidAction, PlayerTurn, Turn};
 
 use rand::Rng;
 
@@ -22,15 +25,18 @@ macro_rules! id_type {
                 self.0 as usize
             }
         }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}{}", stringify!($name).trim_end_matches("Id"), self.0)
+            }
+        }
     };
 }
 
 id_type!(PlayerId);
-
 id_type!(VertexId);
-
 id_type!(EdgeId);
-
 id_type!(TileId);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +54,7 @@ pub enum Phase {
     ChanceRoll,
     Discard {
         remaining: [bool; 4],
+        targets: [u8; 4],
         active: PlayerId,
     },
     MoveRobber,
@@ -63,24 +70,21 @@ pub enum Phase {
     },
 }
 
-// ---------------------------------------------------------------------------
-// Game
-// ---------------------------------------------------------------------------
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TurnFlags {
+    pub dev_card_played: bool,
+    pub dev_cards_bought: DevCardHand,
+    pub has_rolled: bool,
+}
 
 #[derive(Clone, Debug)]
 pub struct Game {
     pub board: Board,
     pub players: [Player; 4],
     pub phase: Phase,
+    pub turn_flags: TurnFlags,
     pub current_player: PlayerId,
     pub turn_number: u16,
-    pub dev_card_played_this_turn: bool,
-    pub dev_cards_bought_this_turn: DevCardHand,
-    pub has_rolled_this_turn: bool,
-    pub longest_road_owner: Option<PlayerId>,
-    pub longest_road_length: u8,
-    pub largest_army_owner: Option<PlayerId>,
-    pub largest_army_size: u8,
 }
 
 impl Game {
@@ -99,13 +103,7 @@ impl Game {
             },
             current_player: PlayerId::P0,
             turn_number: 0,
-            dev_card_played_this_turn: false,
-            dev_cards_bought_this_turn: DevCardHand::EMPTY,
-            has_rolled_this_turn: false,
-            longest_road_owner: None,
-            longest_road_length: 0,
-            largest_army_owner: None,
-            largest_army_size: 0,
+            turn_flags: TurnFlags::default(),
         }
     }
 
@@ -118,19 +116,11 @@ impl Game {
         }
     }
 
-    pub fn is_terminal(&self) -> bool {
-        matches!(self.phase, Phase::GameOver { .. })
-    }
-
     pub fn winner(&self) -> Option<PlayerId> {
         match self.phase {
             Phase::GameOver { winner } => Some(winner),
             _ => None,
         }
-    }
-
-    pub fn is_chance_node(&self) -> bool {
-        matches!(self.phase, Phase::ChanceRoll)
     }
 }
 
@@ -193,11 +183,5 @@ impl PlayerId {
 
     pub fn prev(self) -> Self {
         Self((self.0 + 3) % 4)
-    }
-}
-
-impl fmt::Display for PlayerId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "P{}", self.0)
     }
 }

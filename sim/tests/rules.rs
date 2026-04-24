@@ -1,8 +1,10 @@
+use rand::Rng;
+use rand::RngExt;
+use rand::SeedableRng;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
 
 use catan_sim::board::{
-    DevelopmentCard, Edge, Resource, ResourceBank, Terrain, Vertex, NUM_VERTICES, TOPO,
+    DevelopmentCard, Edge, NUM_VERTICES, Resource, ResourceBank, TOPO, Terrain, Vertex,
 };
 use catan_sim::{Action, Game, Phase, PlayerId, TileId, Turn, VertexId};
 
@@ -14,7 +16,7 @@ fn play_setup(game: &mut Game, rng: &mut impl Rng) {
         match game.turn() {
             Turn::Player(turn) => {
                 let actions: Vec<_> = turn.mask.actions().collect();
-                turn.apply(actions[rng.gen_range(0..actions.len())], rng)
+                turn.apply(actions[rng.random_range(0..actions.len())], rng)
                     .unwrap();
             }
             _ => panic!("unexpected phase during setup"),
@@ -66,7 +68,7 @@ fn no_adjacent_settlements() {
                 Turn::Chance(c) => c.resolve_random(&mut rng),
                 Turn::Player(turn) => {
                     let actions: Vec<_> = turn.mask.actions().collect();
-                    turn.apply(actions[rng.gen_range(0..actions.len())], &mut rng)
+                    turn.apply(actions[rng.random_range(0..actions.len())], &mut rng)
                         .unwrap();
                     steps += 1;
                     if steps > 3000 {
@@ -105,7 +107,7 @@ fn resources_conserved() {
                 Turn::Chance(c) => c.resolve_random(&mut rng),
                 Turn::Player(turn) => {
                     let actions: Vec<_> = turn.mask.actions().collect();
-                    turn.apply(actions[rng.gen_range(0..actions.len())], &mut rng)
+                    turn.apply(actions[rng.random_range(0..actions.len())], &mut rng)
                         .unwrap();
                     steps += 1;
                     if steps > 3000 {
@@ -279,7 +281,11 @@ fn monopoly_collects_from_all_opponents() {
     game.players[1].resources[Resource::Ore] = 2;
     game.players[2].resources[Resource::Ore] = 1;
     game.players[3].resources[Resource::Ore] = 4;
-    let total_ore_before: u8 = game.players.iter().map(|p| p.resources[Resource::Ore]).sum();
+    let total_ore_before: u8 = game
+        .players
+        .iter()
+        .map(|p| p.resources[Resource::Ore])
+        .sum();
 
     match game.turn() {
         Turn::Player(turn) => {
@@ -289,8 +295,15 @@ fn monopoly_collects_from_all_opponents() {
         _ => panic!(),
     };
 
-    let total_ore_after: u8 = game.players.iter().map(|p| p.resources[Resource::Ore]).sum();
-    assert_eq!(total_ore_before, total_ore_after, "monopoly should conserve resources");
+    let total_ore_after: u8 = game
+        .players
+        .iter()
+        .map(|p| p.resources[Resource::Ore])
+        .sum();
+    assert_eq!(
+        total_ore_before, total_ore_after,
+        "monopoly should conserve resources"
+    );
     assert_eq!(game.players[pi].resources[Resource::Ore], total_ore_before);
     for i in 0..4 {
         if i != pi {
@@ -362,13 +375,15 @@ fn bank_trade_respects_port_rates() {
     game.players[pi].resources = ResourceBank([3, 0, 0, 0, 0]);
     match game.turn() {
         Turn::Player(turn) => {
-            assert!(turn.mask.get(
-                Action::BankTrade {
-                    give: Resource::Brick,
-                    receive: Resource::Lumber
-                }
-                .to_index()
-            ));
+            assert!(
+                turn.mask.get(
+                    Action::BankTrade {
+                        give: Resource::Brick,
+                        receive: Resource::Lumber
+                    }
+                    .to_index()
+                )
+            );
         }
         _ => panic!(),
     };
@@ -378,13 +393,15 @@ fn bank_trade_respects_port_rates() {
     game.players[pi].resources = ResourceBank([2, 0, 0, 0, 0]);
     match game.turn() {
         Turn::Player(turn) => {
-            assert!(turn.mask.get(
-                Action::BankTrade {
-                    give: Resource::Brick,
-                    receive: Resource::Grain
-                }
-                .to_index()
-            ));
+            assert!(
+                turn.mask.get(
+                    Action::BankTrade {
+                        give: Resource::Brick,
+                        receive: Resource::Grain
+                    }
+                    .to_index()
+                )
+            );
         }
         _ => panic!(),
     };
@@ -502,7 +519,7 @@ fn building_supply_never_negative() {
                 Turn::Chance(c) => c.resolve_random(&mut rng),
                 Turn::Player(turn) => {
                     let actions: Vec<_> = turn.mask.actions().collect();
-                    turn.apply(actions[rng.gen_range(0..actions.len())], &mut rng)
+                    turn.apply(actions[rng.random_range(0..actions.len())], &mut rng)
                         .unwrap();
                     steps += 1;
                     if steps > 3000 {
@@ -596,7 +613,9 @@ fn cities_produce_double_resources() {
     game.players[pi].settlements_left += 1;
 
     // Clear all resources, ensure robber is elsewhere
-    for p in &mut game.players { p.resources = ResourceBank([0; 5]); }
+    for p in &mut game.players {
+        p.resources = ResourceBank([0; 5]);
+    }
     if game.board.robber == TileId(tile_idx as u8) {
         game.board.robber = TileId(((tile_idx + 1) % 19) as u8);
     }
@@ -638,16 +657,16 @@ fn year_of_plenty_capped_by_bank() {
     match game.turn() {
         Turn::Player(turn) => {
             assert!(
-                !turn.mask.get(
-                    Action::PlayYearOfPlenty(Resource::Brick, Resource::Brick).to_index()
-                ),
+                !turn
+                    .mask
+                    .get(Action::PlayYearOfPlenty(Resource::Brick, Resource::Brick).to_index()),
                 "YoP(Brick,Brick) should be unavailable with only 1 in bank"
             );
             // YoP(Brick, Lumber) also unavailable since Lumber=0
             assert!(
-                !turn.mask.get(
-                    Action::PlayYearOfPlenty(Resource::Brick, Resource::Lumber).to_index()
-                ),
+                !turn
+                    .mask
+                    .get(Action::PlayYearOfPlenty(Resource::Brick, Resource::Lumber).to_index()),
             );
         }
         _ => panic!(),
@@ -659,9 +678,10 @@ fn year_of_plenty_capped_by_bank() {
     let before_ore = game.players[pi].resources[Resource::Ore];
     match game.turn() {
         Turn::Player(turn) => {
-            assert!(turn.mask.get(
-                Action::PlayYearOfPlenty(Resource::Brick, Resource::Ore).to_index()
-            ));
+            assert!(
+                turn.mask
+                    .get(Action::PlayYearOfPlenty(Resource::Brick, Resource::Ore).to_index())
+            );
             turn.apply(
                 Action::PlayYearOfPlenty(Resource::Brick, Resource::Ore),
                 &mut rng,
@@ -670,7 +690,10 @@ fn year_of_plenty_capped_by_bank() {
         }
         _ => panic!(),
     };
-    assert_eq!(game.players[pi].resources[Resource::Brick], before_brick + 1);
+    assert_eq!(
+        game.players[pi].resources[Resource::Brick],
+        before_brick + 1
+    );
     assert_eq!(game.players[pi].resources[Resource::Ore], before_ore + 1);
     assert_eq!(game.board.bank[Resource::Brick], 0);
     assert_eq!(game.board.bank[Resource::Ore], 0);
@@ -819,7 +842,10 @@ fn largest_army_requires_three_knights() {
 
     let pi = game.current_player.idx();
     game.players[pi].played_knights = 2;
-    assert!(game.largest_army_owner().is_none(), "2 knights should not qualify");
+    assert!(
+        game.largest_army_owner().is_none(),
+        "2 knights should not qualify"
+    );
 
     game.players[pi].played_knights = 3;
     assert_eq!(game.largest_army_owner(), Some(game.current_player));
@@ -938,22 +964,33 @@ fn building_counts_match_board_state() {
                 Turn::Chance(c) => c.resolve_random(&mut rng),
                 Turn::Player(turn) => {
                     let actions: Vec<_> = turn.mask.actions().collect();
-                    turn.apply(actions[rng.gen_range(0..actions.len())], &mut rng)
+                    turn.apply(actions[rng.random_range(0..actions.len())], &mut rng)
                         .unwrap();
                     steps += 1;
-                    if steps > 2000 { break; }
+                    if steps > 2000 {
+                        break;
+                    }
                 }
             }
 
             for i in 0..4 {
                 let pid = PlayerId(i as u8);
-                let settlements_on_board = game.board.vertices.iter()
+                let settlements_on_board = game
+                    .board
+                    .vertices
+                    .iter()
                     .filter(|v| matches!(v, Vertex::Settlement(p) if *p == pid))
                     .count() as u8;
-                let cities_on_board = game.board.vertices.iter()
+                let cities_on_board = game
+                    .board
+                    .vertices
+                    .iter()
                     .filter(|v| matches!(v, Vertex::City(p) if *p == pid))
                     .count() as u8;
-                let roads_on_board = game.board.edges.iter()
+                let roads_on_board = game
+                    .board
+                    .edges
+                    .iter()
                     .filter(|e| matches!(e, Edge::Road(p) if *p == pid))
                     .count() as u8;
 
@@ -1023,11 +1060,13 @@ fn no_invalid_actions_offered() {
                     // Every offered action should succeed without error
                     let actions: Vec<_> = turn.mask.actions().collect();
                     assert!(!actions.is_empty(), "seed={seed} step={steps}: empty mask");
-                    let action = actions[rng.gen_range(0..actions.len())];
+                    let action = actions[rng.random_range(0..actions.len())];
                     turn.apply(action, &mut rng)
                         .unwrap_or_else(|e| panic!("seed={seed} step={steps}: {e}"));
                     steps += 1;
-                    if steps > 3000 { break; }
+                    if steps > 3000 {
+                        break;
+                    }
                 }
             }
         }
@@ -1141,14 +1180,19 @@ fn bank_trade_no_self_trade() {
 
     match game.turn() {
         Turn::Player(turn) => {
-            let trades: Vec<_> = turn.mask.actions()
+            let trades: Vec<_> = turn
+                .mask
+                .actions()
                 .filter_map(|a| match a {
                     Action::BankTrade { give, receive } => Some((give, receive)),
                     _ => None,
                 })
                 .collect();
             for (give, receive) in &trades {
-                assert_ne!(give, receive, "should not be able to trade {give:?} for itself");
+                assert_ne!(
+                    give, receive,
+                    "should not be able to trade {give:?} for itself"
+                );
             }
             assert!(!trades.is_empty(), "should have some bank trades available");
         }
@@ -1202,7 +1246,9 @@ fn settlement_requires_road_connection_in_main_phase() {
     // Collect settlement actions from the mask, then verify against the board
     let settlement_vertices: Vec<u8> = match game.turn() {
         Turn::Player(turn) => {
-            let verts: Vec<_> = turn.mask.actions()
+            let verts: Vec<_> = turn
+                .mask
+                .actions()
                 .filter_map(|a| match a {
                     Action::PlaceSettlement(v) => Some(v.0),
                     _ => None,
@@ -1242,8 +1288,12 @@ fn vp_dev_cards_passive() {
     game.players[pi].dev_cards += DevelopmentCard::VictoryPoint;
     let vp_with = game.victory_points(game.current_player);
 
-    game.players[pi].dev_cards.checked_sub_assign(DevelopmentCard::VictoryPoint);
-    game.players[pi].dev_cards.checked_sub_assign(DevelopmentCard::VictoryPoint);
+    game.players[pi]
+        .dev_cards
+        .checked_sub_assign(DevelopmentCard::VictoryPoint);
+    game.players[pi]
+        .dev_cards
+        .checked_sub_assign(DevelopmentCard::VictoryPoint);
     let vp_without = game.victory_points(game.current_player);
     assert_eq!(vp_with, vp_without + 2);
 
@@ -1254,7 +1304,8 @@ fn vp_dev_cards_passive() {
             let actions: Vec<_> = turn.mask.actions().collect();
             for a in &actions {
                 assert!(
-                    !matches!(a, Action::PlayKnight) || game.players[pi].dev_cards.has(DevelopmentCard::Knight),
+                    !matches!(a, Action::PlayKnight)
+                        || game.players[pi].dev_cards.has(DevelopmentCard::Knight),
                     "shouldn't offer VP card as a playable action"
                 );
             }
@@ -1328,20 +1379,26 @@ fn no_road_on_occupied_edge() {
             // Check before taking the turn (no borrow conflict)
             match game.turn() {
                 Turn::Terminal => break,
-                Turn::Chance(c) => { c.resolve_random(&mut rng); continue; }
+                Turn::Chance(c) => {
+                    c.resolve_random(&mut rng);
+                    continue;
+                }
                 Turn::Player(turn) => {
                     let actions: Vec<_> = turn.mask.actions().collect();
-                    let choice = rng.gen_range(0..actions.len());
+                    let choice = rng.random_range(0..actions.len());
                     turn.apply(actions[choice], &mut rng).unwrap();
                     // Verify the action we just applied didn't place on occupied
                     if let Action::PlaceRoad(e) = actions[choice] {
                         assert!(
                             game.board.edges[e.idx()].owner().is_some(),
-                            "seed={seed}: road should now be placed on edge {}", e.0
+                            "seed={seed}: road should now be placed on edge {}",
+                            e.0
                         );
                     }
                     steps += 1;
-                    if steps > 2000 { break; }
+                    if steps > 2000 {
+                        break;
+                    }
                 }
             }
         }
@@ -1372,9 +1429,7 @@ fn steal_candidates_are_adjacent_to_robber() {
     };
 
     // Pick a specific tile to move robber to
-    let target_tile = (0..19u8)
-        .find(|&t| TileId(t) != game.board.robber)
-        .unwrap();
+    let target_tile = (0..19u8).find(|&t| TileId(t) != game.board.robber).unwrap();
 
     match game.turn() {
         Turn::Player(turn) => {
@@ -1389,13 +1444,16 @@ fn steal_candidates_are_adjacent_to_robber() {
     if let Phase::Steal { candidates } = &game.phase {
         for (i, &is_candidate) in candidates.iter().enumerate() {
             let pid = PlayerId(i as u8);
-            let adjacent = topo.tile_vertices[target_tile as usize].iter().any(|&v| {
-                game.board.vertices[v as usize].owner() == Some(pid)
-            });
+            let adjacent = topo.tile_vertices[target_tile as usize]
+                .iter()
+                .any(|&v| game.board.vertices[v as usize].owner() == Some(pid));
             if pid == game.current_player {
                 assert!(!is_candidate, "self should never be a steal candidate");
             } else if adjacent && game.players[i].resources.total() > 0 {
-                assert!(is_candidate, "P{i} is adjacent with resources but not a candidate");
+                assert!(
+                    is_candidate,
+                    "P{i} is adjacent with resources but not a candidate"
+                );
             } else {
                 assert!(!is_candidate, "P{i} shouldn't be a candidate");
             }

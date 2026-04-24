@@ -1,0 +1,12 @@
+[package]
+name = "az"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+burn = "0.20"
+rand = { workspace = true }
+rayon = "1"
+
+[dev-dependencies]
+burn = { version = "0.20", features = ["ndarray", "autodiff"] }

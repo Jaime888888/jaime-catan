@@ -7,13 +7,14 @@ pub mod transition;
 use core::fmt;
 
 pub use action::{ACTION_SPACE_SIZE, Action, ActionMask, ActionMaskIter};
+pub use board::Port;
 pub use board::{Board, Resource, TOPO, Terrain};
-pub use observation::{OBSERVATION_LEN, Observation};
+pub use observation::{ObsEdge, ObsVertex, Observation, PlayerRelation};
 pub use transition::{ChanceTurn, InvalidAction, PlayerTurn, Turn};
 
 use rand::Rng;
 
-use crate::board::{DevCardHand, Port, ResourceBank};
+use crate::board::{DevCardHand, ResourceBank};
 
 macro_rules! id_type {
     ($name:ident) => {

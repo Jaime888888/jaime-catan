@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::RngExt;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
@@ -6,7 +6,7 @@ use catan_sim::{Game, Turn};
 
 fn main() {
     // let mut rng = StdRng::seed_from_u64(42);
-    let mut rng = StdRng::from_entropy();
+    let mut rng = StdRng::from_rng(&mut rand::rng());
     let mut game = Game::new(&mut rng);
 
     println!("{game}\n");
@@ -18,7 +18,7 @@ fn main() {
             Turn::Chance(chance) => chance.resolve_random(&mut rng),
             Turn::Player(turn) => {
                 let actions = turn.mask.actions().collect::<Vec<_>>();
-                let idx = rng.gen_range(0..actions.len());
+                let idx = rng.random_range(0..actions.len());
                 let action = actions[idx];
                 turn.apply(action, &mut rng).unwrap();
                 action_count += 1;

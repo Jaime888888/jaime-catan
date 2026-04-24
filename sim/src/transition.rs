@@ -1,4 +1,4 @@
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 use crate::action::{Action, ActionMask};
 use crate::board::{
@@ -42,17 +42,12 @@ pub struct ChanceTurn<'a> {
 }
 
 impl Game {
-    pub fn turn(&mut self) -> Turn<'_> {
-        match self.phase {
-            Phase::GameOver { .. } => return Turn::Terminal,
-            Phase::ChanceRoll => return Turn::Chance(ChanceTurn { game: self }),
-            _ => {}
-        }
-
+    pub fn action_mask(&self) -> ActionMask {
         let topo = &*TOPO;
         let mut mask = ActionMask::EMPTY;
 
         match &self.phase {
+            Phase::GameOver { .. } | Phase::ChanceRoll => return mask,
             Phase::SetupSettlement { .. } => {
                 for v in 0..NUM_VERTICES {
                     if self.board.vertex_placement_valid(v) {
@@ -173,10 +168,20 @@ impl Game {
                     self.legal_road_placements(self.current_player, &mut mask);
                 }
             }
-            Phase::ChanceRoll | Phase::GameOver { .. } => unreachable!(),
         }
 
-        Turn::Player(PlayerTurn { game: self, mask })
+        mask
+    }
+
+    pub fn turn(&mut self) -> Turn<'_> {
+        match self.phase {
+            Phase::GameOver { .. } => Turn::Terminal,
+            Phase::ChanceRoll => Turn::Chance(ChanceTurn { game: self }),
+            _ => {
+                let mask = self.action_mask();
+                Turn::Player(PlayerTurn { game: self, mask })
+            }
+        }
     }
 }
 
@@ -350,7 +355,7 @@ impl<'a> PlayerTurn<'a> {
             Action::StealFrom(target) => {
                 let total = game.players[target.idx()].resources.total();
                 if total > 0 {
-                    let pick = rng.gen_range(0..total);
+                    let pick = rng.random_range(0..total);
                     let mut cum = 0u8;
                     for r in Resource::ALL {
                         cum += game.players[target.idx()].resources[r];
@@ -472,7 +477,7 @@ impl<'a> ChanceTurn<'a> {
     }
 
     pub fn resolve_random(self, rng: &mut impl Rng) {
-        self.resolve(rng.gen_range(1..=6u8) + rng.gen_range(1..=6u8));
+        self.resolve(rng.random_range(1..=6u8) + rng.random_range(1..=6u8));
     }
 }
 

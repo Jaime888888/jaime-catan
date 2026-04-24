@@ -1,11 +1,7 @@
-use crate::board::{
-    DevelopmentCard, Edge, NUM_EDGES, NUM_PORTS, NUM_TILES, NUM_VERTICES, Port, TOPO, Vertex,
-};
+use crate::board::{Edge, NUM_EDGES, NUM_PORTS, NUM_TILES, NUM_VERTICES, Port, Terrain, Vertex};
 use crate::{Game, PlayerId, TileId};
-use std::mem::{align_of, size_of};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
 pub enum PlayerRelation {
     Self_ = 0,
     Clockwise1 = 1,
@@ -23,56 +19,47 @@ fn player_relative(observer: PlayerId, other: PlayerId) -> PlayerRelation {
     }
 }
 
-#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub enum ObsVertex {
+    Empty,
+    Settlement(PlayerRelation),
+    City(PlayerRelation),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ObsEdge {
+    Empty,
+    Road(PlayerRelation),
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ObsTile {
-    pub terrain: u8,
+    pub terrain: Terrain,
     pub number: u8,
-    pub has_robber: u8,
-    pub adjacent_vertex_buildings: [u8; 6],
+    pub has_robber: bool,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct ObsHarbor {
-    pub port_kind: u8,
-    pub adjacent_vertex_a: u8,
-    pub adjacent_vertex_b: u8,
-}
-
-#[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct ObsSelf {
     pub resources: [u8; 5],
     pub dev_cards: [u8; 5],
     pub played_knights: u8,
-    pub victory_points: u8,
-    pub has_longest_road: u8,
+    pub has_longest_road: bool,
     pub longest_road_length: u8,
-    pub has_largest_army: u8,
-    pub settlements_left: u8,
-    pub cities_left: u8,
-    pub roads_left: u8,
-    pub has_three_to_one_port: u8,
-    pub two_to_one_ports: [u8; 5],
+    pub has_largest_army: bool,
+    pub has_three_to_one_port: bool,
+    pub two_to_one_ports: [bool; 5],
 }
 
-#[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct ObsOther {
-    pub relation: u8,
     pub total_resource_cards: u8,
     pub total_dev_cards: u8,
     pub played_knights: u8,
-    pub public_victory_points: u8,
-    pub has_longest_road: u8,
-    pub has_largest_army: u8,
-    pub settlements_left: u8,
-    pub cities_left: u8,
-    pub roads_left: u8,
+    pub has_longest_road: bool,
+    pub has_largest_army: bool,
 }
 
-#[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct ObsMeta {
     pub turn_number: u16,
@@ -80,99 +67,64 @@ pub struct ObsMeta {
     pub resource_bank: [u8; 5],
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Observation {
     pub tiles: [ObsTile; NUM_TILES],
-    pub vertices: [u8; NUM_VERTICES],
-    pub edges: [u8; NUM_EDGES],
-    pub harbors: [ObsHarbor; NUM_PORTS],
+    pub vertices: [ObsVertex; NUM_VERTICES],
+    pub edges: [ObsEdge; NUM_EDGES],
+    pub harbors: [Port; NUM_PORTS],
     pub self_player: ObsSelf,
     pub other_players: [ObsOther; 3],
     pub meta: ObsMeta,
 }
 
-pub const OBSERVATION_LEN: usize = size_of::<Observation>();
-
-const _: () = assert!(OBSERVATION_LEN == 386);
-const _: () = assert!(align_of::<Observation>() == 2);
-
-impl Observation {
-    pub fn as_bytes(&self) -> &[u8; OBSERVATION_LEN] {
-        unsafe { &*std::ptr::from_ref(self).cast() }
-    }
-}
-
-fn vertex_byte(game: &Game, perspective: PlayerId, v: usize) -> u8 {
+fn observe_vertex(game: &Game, perspective: PlayerId, v: usize) -> ObsVertex {
     match game.board.vertices[v] {
-        Vertex::Empty => 0,
-        Vertex::Settlement(p) => 1 + player_relative(perspective, p) as u8,
-        Vertex::City(p) => 5 + player_relative(perspective, p) as u8,
+        Vertex::Empty => ObsVertex::Empty,
+        Vertex::Settlement(p) => ObsVertex::Settlement(player_relative(perspective, p)),
+        Vertex::City(p) => ObsVertex::City(player_relative(perspective, p)),
     }
 }
 
 impl Game {
     pub fn observe(&self, perspective: PlayerId) -> Observation {
-        let topo = &*TOPO;
-
         Observation {
             tiles: std::array::from_fn(|t| {
                 let tile = &self.board.tiles[t];
                 ObsTile {
-                    terrain: tile.terrain as u8,
+                    terrain: tile.terrain,
                     number: tile.number,
-                    has_robber: (self.board.robber == TileId(t as u8)) as u8,
-                    adjacent_vertex_buildings: std::array::from_fn(|c| {
-                        vertex_byte(self, perspective, topo.tile_vertices[t][c] as usize)
-                    }),
+                    has_robber: self.board.robber == TileId(t as u8),
                 }
             }),
-            vertices: std::array::from_fn(|v| vertex_byte(self, perspective, v)),
+            vertices: std::array::from_fn(|v| observe_vertex(self, perspective, v)),
             edges: std::array::from_fn(|e| match self.board.edges[e] {
-                Edge::Empty => 0,
-                Edge::Road(p) => 1 + player_relative(perspective, p) as u8,
+                Edge::Empty => ObsEdge::Empty,
+                Edge::Road(p) => ObsEdge::Road(player_relative(perspective, p)),
             }),
-            harbors: std::array::from_fn(|i| ObsHarbor {
-                port_kind: match self.board.harbors[i] {
-                    Port::ThreeToOne => 0,
-                    Port::TwoToOne(r) => 1 + r as u8,
-                },
-                adjacent_vertex_a: topo.port_vertices[i][0],
-                adjacent_vertex_b: topo.port_vertices[i][1],
-            }),
+            harbors: self.board.harbors,
             self_player: {
                 let p = &self.players[perspective.idx()];
                 ObsSelf {
                     resources: p.resources.0,
                     dev_cards: p.dev_cards.0,
                     played_knights: p.played_knights,
-                    victory_points: self.victory_points(perspective),
-                    has_longest_road: (self.longest_road_owner() == Some(perspective)) as u8,
+                    has_longest_road: self.longest_road_owner() == Some(perspective),
                     longest_road_length: self.longest_road_len[perspective.idx()],
-                    has_largest_army: (self.largest_army_owner() == Some(perspective)) as u8,
-                    settlements_left: p.settlements_left,
-                    cities_left: p.cities_left,
-                    roads_left: p.roads_left,
-                    has_three_to_one_port: p.has_three_to_one_port as u8,
-                    two_to_one_ports: std::array::from_fn(|i| p.two_to_one_ports[i] as u8),
+                    has_largest_army: self.largest_army_owner() == Some(perspective),
+                    has_three_to_one_port: p.has_three_to_one_port,
+                    two_to_one_ports: p.two_to_one_ports,
                 }
             },
             other_players: std::array::from_fn(|i| {
                 let pid = PlayerId(((perspective.0 as usize + 1 + i) % 4) as u8);
                 let op = &self.players[pid.idx()];
                 ObsOther {
-                    relation: player_relative(perspective, pid) as u8,
                     total_resource_cards: op.resources.total(),
                     total_dev_cards: op.dev_cards.total(),
                     played_knights: op.played_knights,
-                    public_victory_points: self
-                        .victory_points(pid)
-                        .saturating_sub(op.dev_cards[DevelopmentCard::VictoryPoint]),
-                    has_longest_road: (self.longest_road_owner() == Some(pid)) as u8,
-                    has_largest_army: (self.largest_army_owner() == Some(pid)) as u8,
-                    settlements_left: op.settlements_left,
-                    cities_left: op.cities_left,
-                    roads_left: op.roads_left,
+                    has_longest_road: self.longest_road_owner() == Some(pid),
+                    has_largest_army: self.largest_army_owner() == Some(pid),
                 }
             }),
             meta: ObsMeta {

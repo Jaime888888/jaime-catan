@@ -123,6 +123,20 @@ impl Game<ACT, OBS, PLAYERS> for CatanGame {
         }
     }
 
+    fn capped_value_target(&self) -> Option<[f32; PLAYERS]> {
+        let mut vp = [0.0f32; PLAYERS];
+        for (i, score) in vp.iter_mut().enumerate() {
+            *score = self
+                .inner
+                .victory_points(Self::index_to_player(i)) as f32;
+        }
+        let sum: f32 = vp.iter().sum();
+        if sum <= 0.0 {
+            return Some([1.0 / PLAYERS as f32; PLAYERS]);
+        }
+        Some(std::array::from_fn(|i| vp[i] / sum))
+    }
+
     fn action_to_index(action: Action) -> usize {
         action.to_index()
     }
@@ -261,15 +275,16 @@ fn main() {
     };
     let net = ResNet::<B>::new(&net_config, &device);
 
-    #[cfg(target_os = "macos")]
     let config = TrainConfig {
-        iterations: 100,
-        games_per_iteration: 24,
-        replay_capacity: 16 * 1024,
-        batch_size: 128,
-        training_steps_per_iteration: 32,
-        max_simulations: 160,
-        sims_per_eval: 16,
+        iterations: 1000,
+        games_per_iteration: 96,
+        replay_capacity: 2 * 1024 * 1024,
+        batch_size: 256,
+        training_steps_per_iteration: 256,
+        max_simulations: 600,
+        sims_per_eval: 24,
+        max_game_steps: 5_000,
+        learning_rate: 2e-4,
         ..Default::default()
     };
 

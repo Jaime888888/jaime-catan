@@ -1,7 +1,5 @@
 #![recursion_limit = "256"]
 
-use std::sync::Arc;
-
 use az::{Game, IterationStats, ResNet, ResNetConfig, TrainConfig, train_loop};
 use burn::backend::Autodiff;
 use burn::tensor::backend::Backend;
@@ -10,7 +8,6 @@ use catan_sim::{
 };
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-use wandb::{BackendOptions, RunInfo, WandB};
 
 #[cfg(target_os = "macos")]
 mod backend {
@@ -253,7 +250,7 @@ fn main() {
 
     eprintln!("backend: {}", backend::NAME);
 
-    let device = <backend::Inner as Backend>::Device::default();
+    let device = <B as Backend>::Device::default();
 
     let net_config = ResNetConfig {
         obs_size: OBS,
@@ -264,16 +261,16 @@ fn main() {
     };
     let net = ResNet::<B>::new(&net_config, &device);
 
+    #[cfg(target_os = "macos")]
     let config = TrainConfig {
         iterations: 100,
-        games_per_iteration: 16,
-        batch_size: 32,
-        replay_capacity: 10_000,
-        training_steps_per_iteration: 50,
-        learning_rate: 1e-3,
-        max_simulations: 50,
-        c_puct: 1.5,
-        temperature: 1.0,
+        games_per_iteration: 24,
+        replay_capacity: 16 * 1024,
+        batch_size: 128,
+        training_steps_per_iteration: 32,
+        max_simulations: 160,
+        sims_per_eval: 16,
+        ..Default::default()
     };
 
     // let runtime = tokio::runtime::Builder::new_multi_thread()

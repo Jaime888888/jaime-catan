@@ -124,6 +124,7 @@ fn end_to_end() {
         net,
         TicTacToe::new,
         TrainConfig {
+            replay_capacity: 1000,
             ..Default::default()
         },
         device,

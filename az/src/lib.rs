@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::sync::mpsc;
 use std::time::Instant;
 
 use rand::RngExt;
@@ -49,7 +50,7 @@ pub struct Sample<const ACT: usize, const OBS: usize, const PLAYERS: usize> {
     pub value_target: [f32; PLAYERS],
 }
 
-pub fn evaluate_batch<B, N, const ACT: usize, const OBS: usize, const PLAYERS: usize>(
+fn evaluate_batch<B, N, const ACT: usize, const OBS: usize, const PLAYERS: usize>(
     net: &N,
     device: &B::Device,
     observations: &[[f32; OBS]],
@@ -59,14 +60,12 @@ where
     N: AZNet<B>,
 {
     let bs = observations.len();
-    assert!(bs > 0, "evaluate_batch called with empty observations");
-
+    assert!(bs > 0, "evaluate_batch: empty observations");
     let flat: Vec<f32> = observations
         .iter()
         .flat_map(|o| o.iter().copied())
         .collect();
     let tensor: Tensor<B, 2> = Tensor::from_data(TensorData::new(flat, [bs, OBS]), device);
-
     let (policy_logits, values) = net.forward(tensor);
 
     let policy_data: Vec<f32> = policy_logits.into_data().to_vec().expect("policy to vec");
@@ -76,9 +75,9 @@ where
         .map(|i| {
             let mut policy = [0.0f32; ACT];
             policy.copy_from_slice(&policy_data[i * ACT..(i + 1) * ACT]);
-            let mut values = [0.0f32; PLAYERS];
-            values.copy_from_slice(&value_data[i * PLAYERS..(i + 1) * PLAYERS]);
-            (policy, values)
+            let mut vals = [0.0f32; PLAYERS];
+            vals.copy_from_slice(&value_data[i * PLAYERS..(i + 1) * PLAYERS]);
+            (policy, vals)
         })
         .collect()
 }
@@ -94,6 +93,7 @@ pub struct TrainConfig {
     pub learning_rate: f64,
 
     pub max_simulations: u32,
+    pub sims_per_eval: u32,
     pub c_puct: f32,
     pub temperature: f32,
 }
@@ -110,6 +110,7 @@ impl Default for TrainConfig {
             learning_rate: 1e-3,
 
             max_simulations: 800,
+            sims_per_eval: 8,
             c_puct: 1.5,
             temperature: 1.0,
         }
@@ -137,7 +138,7 @@ pub fn train_loop<B, N, G, const ACT: usize, const OBS: usize, const PLAYERS: us
 where
     B: AutodiffBackend,
     N: AZNet<B> + AutodiffModule<B> + Clone,
-    N::InnerModule: AZNet<B::InnerBackend>,
+    N::InnerModule: AZNet<B::InnerBackend> + 'static,
     G: Game<ACT, OBS, PLAYERS>,
 {
     let mut buffer = ReplayBuffer::<ACT, OBS, PLAYERS>::new(config.replay_capacity);
@@ -146,49 +147,96 @@ where
 
     for iteration in 0..config.iterations {
         let iter_start = Instant::now();
-        let inference_net = net.clone().valid();
         let n = config.games_per_iteration;
 
         let (mut games, mut trees): (Vec<_>, Vec<_>) =
             (0..n).map(|_| (game_factory(), Tree::new())).unzip();
-        let mut histories = (0..n).map(|_| Vec::new()).collect::<Vec<_>>();
+        let mut histories: Vec<Vec<_>> = (0..n).map(|_| Vec::new()).collect();
         let mut samples: Vec<Sample<ACT, OBS, PLAYERS>> = Vec::new();
 
-        while !games.is_empty() {
-            for _ in 0..config.max_simulations {
-                let leaves: Vec<Option<(usize, Leaf<G>, [f32; OBS])>> = trees
-                    .par_iter_mut()
-                    .zip(games.par_iter())
-                    .enumerate()
-                    .map(|(i, (tree, game))| {
-                        tree.select::<G, OBS>(game, config.c_puct).map(|leaf| {
-                            let obs = leaf.state.observe();
-                            (i, leaf, obs)
-                        })
-                    })
-                    .collect();
+        let (tx_obs, rx_obs) = mpsc::channel::<Vec<[f32; OBS]>>();
+        let (tx_results, rx_results) = mpsc::channel::<Vec<([f32; ACT], [f32; PLAYERS])>>();
 
-                let mut pending: Vec<(usize, Leaf<G>)> = Vec::new();
-                let mut pending_obs: Vec<[f32; OBS]> = Vec::new();
-                for entry in leaves.into_iter().flatten() {
-                    let (i, leaf, obs) = entry;
-                    pending_obs.push(obs);
-                    pending.push((i, leaf));
+        let gpu_net = net.clone().valid();
+        let gpu_dev = device.clone();
+        let gpu_thread = std::thread::spawn(move || {
+            while let Ok(obs) = rx_obs.recv() {
+                let results = evaluate_batch::<B::InnerBackend, N::InnerModule, ACT, OBS, PLAYERS>(
+                    &gpu_net, &gpu_dev, &obs,
+                );
+                tx_results.send(results).expect("results receiver alive");
+            }
+        });
+
+        while !games.is_empty() {
+            let spe = config.sims_per_eval as usize;
+            let outer_rounds = (config.max_simulations as usize).div_ceil(spe);
+            let n_games = games.len();
+            let c_puct = config.c_puct;
+
+            let mut prev: Option<Vec<(usize, Leaf<G>)>> = None;
+
+            for round in 0..=outer_rounds {
+                let (pending, obs) = if round < outer_rounds {
+                    let batched: Vec<Vec<_>> = trees
+                        .par_iter_mut()
+                        .zip(games.par_iter())
+                        .map(|(tree, game)| {
+                            (0..spe)
+                                .filter_map(|_| {
+                                    tree.select::<G, OBS>(game, c_puct).map(|leaf| {
+                                        let obs = leaf.state.observe();
+                                        (leaf, obs)
+                                    })
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    let mut pending = Vec::new();
+                    let mut obs = Vec::new();
+                    for (i, group) in batched.into_iter().enumerate() {
+                        for (leaf, o) in group {
+                            pending.push((i, leaf));
+                            obs.push(o);
+                        }
+                    }
+                    (pending, obs)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+
+                let pending_and_evals = prev.take().map(|prev_pending| {
+                    let evals = rx_results.recv().expect("gpu thread alive");
+                    (prev_pending, evals)
+                });
+
+                if round < outer_rounds && !obs.is_empty() {
+                    tx_obs.send(obs).expect("gpu thread alive");
+                    prev = Some(pending);
                 }
 
-                if !pending_obs.is_empty() {
-                    let evals = evaluate_batch::<B::InnerBackend, N::InnerModule, ACT, OBS, PLAYERS>(
-                        &inference_net,
-                        &device,
-                        &pending_obs,
+                if let Some((prev_pending, evals)) = pending_and_evals {
+                    debug_assert_eq!(
+                        prev_pending.len(),
+                        evals.len(),
+                        "MCTS pending leaves must match network batch size"
                     );
-
-                    for ((i, leaf), (policy, values)) in pending.into_iter().zip(evals) {
-                        trees[i].expand::<G, OBS>(&leaf, &policy, values);
+                    let mut groups: Vec<Vec<_>> = (0..n_games).map(|_| Vec::new()).collect();
+                    for ((i, leaf), (policy, values)) in prev_pending.into_iter().zip(evals) {
+                        groups[i].push((leaf, policy, values));
                     }
+                    trees
+                        .par_iter_mut()
+                        .zip(groups.into_par_iter())
+                        .for_each(|(tree, group)| {
+                            for (ref leaf, ref policy, values) in group {
+                                tree.expand::<G, OBS>(leaf, policy, values);
+                            }
+                        });
                 }
             }
 
+            // Pick moves from the search distributions.
             let move_data: Vec<_> = games
                 .par_iter()
                 .zip(trees.par_iter())
@@ -208,6 +256,7 @@ where
                 games[i].apply(action);
             }
 
+            // Retire finished games and reset trees for ongoing ones.
             let mut i = games.len();
             while i > 0 {
                 i -= 1;
@@ -229,9 +278,13 @@ where
             }
         }
 
+        drop(tx_obs);
+        gpu_thread.join().expect("gpu thread panicked");
+
         let num_samples = samples.len();
         buffer.extend(samples);
 
+        // Training phase.
         let mut last_policy_loss = 0.0f32;
         let mut last_value_loss = 0.0f32;
         let mut last_total_loss = 0.0f32;
@@ -275,13 +328,13 @@ where
                 last_value_loss = value_loss.into_scalar().elem::<f32>();
                 last_total_loss = loss.clone().into_scalar().elem::<f32>();
 
-                let grads = loss.backward();
-                let grads = GradientsParams::from_grads(grads, &net);
+                let raw_grads = loss.backward();
+                let grads = GradientsParams::from_grads(raw_grads, &net);
                 net = optim.step(config.learning_rate, net, grads);
             }
         }
 
-        let stats = IterationStats {
+        on_iteration(&IterationStats {
             iteration: iteration + 1,
             new_samples: num_samples,
             buffer_size: buffer.len(),
@@ -289,12 +342,13 @@ where
             value_loss: last_value_loss,
             total_loss: last_total_loss,
             elapsed_secs: iter_start.elapsed().as_secs_f32(),
-        };
-        on_iteration(&stats);
+        });
     }
 
     net
 }
+
+// ── Replay buffer ────────────────────────────────────────────────────────────
 
 struct ReplayBuffer<const ACT: usize, const OBS: usize, const PLAYERS: usize> {
     buf: VecDeque<Sample<ACT, OBS, PLAYERS>>,

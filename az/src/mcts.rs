@@ -67,13 +67,13 @@ struct Node<const PLAYERS: usize> {
     visit_count: u32,
     value_sum: f32,
     prior: f32,
-    acting_player: u8,
+    acting_player: usize,
     children: Vec<(u16, u32)>,
     state: NodeState<PLAYERS>,
 }
 
 impl<const PLAYERS: usize> Node<PLAYERS> {
-    fn new(prior: f32, acting_player: u8) -> Self {
+    fn new(prior: f32, acting_player: usize) -> Self {
         Self {
             visit_count: 0,
             value_sum: 0.0,
@@ -112,9 +112,9 @@ impl<const ACT: usize, const PLAYERS: usize> Default for Tree<ACT, PLAYERS> {
 
 impl<const ACT: usize, const PLAYERS: usize> Tree<ACT, PLAYERS> {
     pub fn new() -> Self {
-        Self {
-            nodes: vec![Node::new(1.0, 0)],
-        }
+        let mut nodes = Vec::with_capacity(ACT * 1024);
+        nodes.push(Node::new(1.0, 0));
+        Self { nodes }
     }
 
     /// Walk from root to a leaf via PUCT selection. Known-terminal
@@ -125,22 +125,29 @@ impl<const ACT: usize, const PLAYERS: usize> Tree<ACT, PLAYERS> {
     where
         G: Game<ACT, OBS, PLAYERS>,
     {
-        self.nodes[0].acting_player = G::player_to_index(root_state.current_player()) as u8;
+        self.nodes[0].acting_player = G::player_to_index(root_state.current_player());
 
-        let mut path = vec![0u32];
-        let mut actions: Vec<u16> = Vec::new();
+        let mut path = Vec::with_capacity(64);
+        path.push(0u32);
+        let mut state = root_state.clone();
         let mut current = 0u32;
 
         loop {
-            match &self.nodes[current as usize].state {
+            let current_idx = current as usize;
+            match &self.nodes[current_idx].state {
                 NodeState::Terminal(values) => {
                     let values = *values;
                     self.backprop(&path, &values);
                     return None;
                 }
-                NodeState::Leaf => break,
+                NodeState::Leaf => {
+                    if self.nodes[current_idx].visit_count > 0 {
+                        return None;
+                    }
+                    break;
+                }
                 NodeState::Interior => {
-                    let node = &self.nodes[current as usize];
+                    let node = &self.nodes[current_idx];
                     if node.children.is_empty() {
                         break;
                     }
@@ -151,21 +158,16 @@ impl<const ACT: usize, const PLAYERS: usize> Tree<ACT, PLAYERS> {
                         .max_by(|&&(_, a), &&(_, b)| {
                             let sa = self.nodes[a as usize].puct_score(c_puct, sqrt_parent);
                             let sb = self.nodes[b as usize].puct_score(c_puct, sqrt_parent);
-                            sa.partial_cmp(&sb).unwrap()
+                            sa.total_cmp(&sb)
                         })
                         .unwrap();
 
-                    actions.push(action_idx);
+                    let action = G::index_to_action(action_idx as usize);
+                    state.apply(action);
                     path.push(child_id);
                     current = child_id;
                 }
             }
-        }
-
-        let mut state = root_state.clone();
-        for &action_idx in &actions {
-            let action = G::index_to_action(action_idx as usize);
-            state.apply(action);
         }
 
         if state.is_terminal() {
@@ -176,6 +178,9 @@ impl<const ACT: usize, const PLAYERS: usize> Tree<ACT, PLAYERS> {
             return None;
         }
 
+        for &node_id in &path {
+            self.nodes[node_id as usize].visit_count += 1;
+        }
         Some(Leaf {
             path,
             state,
@@ -195,9 +200,10 @@ impl<const ACT: usize, const PLAYERS: usize> Tree<ACT, PLAYERS> {
     {
         let nid = leaf.node_id as usize;
         self.nodes[nid].state = NodeState::Interior;
-        self.nodes[nid].acting_player = G::player_to_index(leaf.state.current_player()) as u8;
+        self.nodes[nid].acting_player = G::player_to_index(leaf.state.current_player());
 
         let legal = leaf.state.legal_actions();
+        debug_assert!(!legal.is_empty(), "expand called with no legal actions");
         let max_logit = legal
             .iter()
             .map(|&a| policy[G::action_to_index(a)])
@@ -217,14 +223,19 @@ impl<const ACT: usize, const PLAYERS: usize> Tree<ACT, PLAYERS> {
         }
         self.nodes[nid].children = children;
 
-        self.backprop(&leaf.path, &values);
+        for &node_id in leaf.path.iter().rev() {
+            let node = &mut self.nodes[node_id as usize];
+            node.value_sum += values[node.acting_player];
+        }
     }
 
+    /// Full backprop: increment visit count and add value.
+    /// Used for paths that did NOT receive virtual loss (e.g. terminals).
     fn backprop(&mut self, path: &[u32], values: &[f32; PLAYERS]) {
         for &node_id in path.iter().rev() {
             let node = &mut self.nodes[node_id as usize];
             node.visit_count += 1;
-            node.value_sum += values[node.acting_player as usize];
+            node.value_sum += values[node.acting_player];
         }
     }
 

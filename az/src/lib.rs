@@ -37,11 +37,6 @@ pub trait Game<const ACT: usize, const OBS: usize, const PLAYERS: usize>:
     fn player_to_index(player: Self::Player) -> usize;
     fn index_to_player(index: usize) -> Self::Player;
     fn observe(&self) -> [f32; OBS];
-    /// Optional value target used when a non-terminal episode is truncated
-    /// by the training step cap. Returning `None` discards the truncated game.
-    fn capped_value_target(&self) -> Option<[f32; PLAYERS]> {
-        None
-    }
 }
 
 pub trait AZNet<B: Backend>: Module<B> + Send {
@@ -99,7 +94,6 @@ pub struct TrainConfig {
 
     pub max_simulations: u32,
     pub sims_per_eval: u32,
-    pub max_game_steps: usize,
     pub c_puct: f32,
     pub temperature: f32,
 }
@@ -117,7 +111,6 @@ impl Default for TrainConfig {
 
             max_simulations: 800,
             sims_per_eval: 8,
-            max_game_steps: 2_000,
             c_puct: 1.5,
             temperature: 1.0,
         }
@@ -160,9 +153,6 @@ where
             (0..n).map(|_| (game_factory(), Tree::new())).unzip();
         let mut histories: Vec<Vec<_>> = (0..n).map(|_| Vec::new()).collect();
         let mut samples: Vec<Sample<ACT, OBS, PLAYERS>> = Vec::new();
-        let mut capped_games_this_iter = 0usize;
-        let mut discarded_capped_samples_this_iter = 0usize;
-        let mut capped_value_samples_this_iter = 0usize;
 
         let (tx_obs, rx_obs) = mpsc::channel::<Vec<[f32; OBS]>>();
         let (tx_results, rx_results) = mpsc::channel::<Vec<([f32; ACT], [f32; PLAYERS])>>();
@@ -286,27 +276,10 @@ where
             while i > 0 {
                 i -= 1;
                 let is_terminal = games[i].is_terminal();
-                let is_capped = histories[i].len() >= config.max_game_steps;
-                if is_terminal || is_capped {
+                if is_terminal {
                     let game = games.swap_remove(i);
                     trees.swap_remove(i);
                     let game_history = histories.swap_remove(i);
-                    if is_capped && !is_terminal {
-                        capped_games_this_iter += 1;
-                        if let Some(result) = game.capped_value_target() {
-                            capped_value_samples_this_iter += game_history.len();
-                            samples.extend(game_history.into_iter().map(
-                                |(obs, pol, _player)| Sample {
-                                    observation: obs,
-                                    policy_target: pol,
-                                    value_target: result,
-                                },
-                            ));
-                            continue;
-                        }
-                        discarded_capped_samples_this_iter += game_history.len();
-                        continue;
-                    }
                     let result: [f32; PLAYERS] =
                         std::array::from_fn(|p| game.result(G::index_to_player(p)));
                     samples.extend(game_history.into_iter().map(|(obs, pol, _player)| Sample {
@@ -386,13 +359,6 @@ where
             total_loss: last_total_loss,
             elapsed_secs: iter_start.elapsed().as_secs_f32(),
         });
-        eprintln!(
-            "az iter {} summary: capped_games={} capped_valued_samples={} capped_discarded_samples={}",
-            iteration + 1,
-            capped_games_this_iter,
-            capped_value_samples_this_iter,
-            discarded_capped_samples_this_iter
-        );
     }
 
     net

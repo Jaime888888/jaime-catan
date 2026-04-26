@@ -2,6 +2,13 @@ use crate::Game;
 use rand::RngExt;
 use rand_distr::{Distribution, multi::Dirichlet};
 
+/// Virtual loss: applied to each node on the path when a leaf is selected for
+/// GPU evaluation, undone in [`Tree::expand`] when the real value arrives.
+/// Pending nodes see `Q = -VIRTUAL_LOSS`, pushing concurrent selects in the
+/// same eval batch toward different subtrees. Tuned for `[0, 1]`-valued game
+/// results (win = 1, loss = 0, as in Catan).
+const VIRTUAL_LOSS: f32 = 1.0;
+
 pub struct ActionDistribution<const ACT: usize>(pub [u32; ACT]);
 
 pub struct ActionPolicy<const ACT: usize>(pub [f32; ACT]);
@@ -182,6 +189,7 @@ impl<const ACT: usize, const PLAYERS: usize> Tree<ACT, PLAYERS> {
 
         for &node_id in &path {
             self.nodes[node_id as usize].visit_count += 1;
+            self.nodes[node_id as usize].value_sum -= VIRTUAL_LOSS;
         }
         Some(Leaf {
             path,
@@ -244,7 +252,7 @@ impl<const ACT: usize, const PLAYERS: usize> Tree<ACT, PLAYERS> {
 
         for &node_id in leaf.path.iter().rev() {
             let node = &mut self.nodes[node_id as usize];
-            node.value_sum += values[node.acting_player];
+            node.value_sum += VIRTUAL_LOSS + values[node.acting_player];
         }
     }
 

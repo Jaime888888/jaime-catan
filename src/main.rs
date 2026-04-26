@@ -3,18 +3,23 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod catan_net;
+
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use az::{Game, IterationStats, ResNet, ResNetConfig, SelfPlayStepInfo, TrainConfig, train};
+use az::{Game, IterationStats, SelfPlayStepInfo, TrainConfig, train};
 use burn::backend::Autodiff;
 use burn::module::Module;
 use burn::record::{BinFileRecorder, FullPrecisionSettings};
 use burn::tensor::backend::Backend;
+use catan_net::{CatanNet, CatanNetConfig, OBS};
 use catan_sim::{
     ACTION_SPACE_SIZE, Action, ObsEdge, ObsVertex, Phase, PlayerId, PlayerRelation, Port, Turn,
 };
+use clap::Parser;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use wandb::{BackendOptions, DataValue, LogData, Run, RunInfo, WandB};
@@ -54,16 +59,6 @@ mod backend {
 
 const ACT: usize = ACTION_SPACE_SIZE;
 const PLAYERS: usize = 4;
-
-// Observation float layout:
-//   tiles:    19 × (terrain_onehot[6] + number + robber)           = 152
-//   vertices: 54 × (building_level + is_mine + opp_relation)      = 162
-//   edges:    72 × (has_road + is_mine + opp_relation)            = 216
-//   harbors:   9 × kind_onehot[6]                                 =  54
-//   self:     resources[5] + dev_cards[5] + 4 scalars + ports[6]  =  20
-//   others:    3 × 5 scalars                                      =  15
-//   meta:     turn_number + dev_remaining + bank[5]               =   7
-const OBS: usize = 152 + 162 + 216 + 54 + 20 + 15 + 7;
 
 fn catan_phase_bucket(phase: &Phase) -> u8 {
     match phase {
@@ -294,21 +289,59 @@ impl Game<ACT, OBS, PLAYERS> for CatanGame {
     }
 }
 
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(long, default_value = "./checkpoints", value_name = "DIR")]
+    checkpoint_dir: PathBuf,
+
+    #[arg(long, value_name = "PATH")]
+    load: Option<PathBuf>,
+}
+
 fn main() {
     type B = Autodiff<backend::Inner>;
+
+    let cli = Args::parse();
 
     eprintln!("backend: {}", backend::NAME);
 
     let device = <B as Backend>::Device::default();
 
-    let net_config = ResNetConfig {
-        obs_size: OBS,
+    let net_config = CatanNetConfig {
         act_size: ACT,
         num_players: PLAYERS,
+        branch_dim: 64,
+        trunk_hidden: 384,
         num_blocks: 4,
-        hidden_dim: 128,
     };
-    let net = ResNet::<B>::new(&net_config, &device);
+
+    let checkpoint_dir = cli.checkpoint_dir;
+    std::fs::create_dir_all(&checkpoint_dir).expect("create checkpoint dir");
+    let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
+
+    let net = if let Some(path) = cli.load {
+        let n = path
+            .file_name()
+            .expect("file name")
+            .to_str()
+            .expect("file name to string")
+            .strip_prefix("iter_")
+            .and_then(|s| s.strip_suffix(".bin"))
+            .expect("expected iter_NNNNN.bin")
+            .parse::<usize>()
+            .expect("iter to usize");
+
+        eprintln!(
+            "resume: loading {} (completed iter index {n}, next global index {})",
+            path.display(),
+            n + 1
+        );
+        CatanNet::<B>::new(&net_config, &device)
+            .load_file(&path, &recorder, &device)
+            .unwrap_or_else(|e| panic!("load checkpoint {}: {e}", path.display()))
+    } else {
+        CatanNet::<B>::new(&net_config, &device)
+    };
 
     let config = TrainConfig {
         iterations: 500,
@@ -384,11 +417,8 @@ fn main() {
     };
 
     const CHECKPOINT_EVERY: usize = 10;
-    let checkpoint_dir = std::path::PathBuf::from("checkpoints");
-    std::fs::create_dir_all(&checkpoint_dir).expect("create checkpoint dir");
-    let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
 
-    let on_iter = |stats: &IterationStats, net: &ResNet<B>| {
+    let on_iter = |stats: &IterationStats, net: &CatanNet<B>| {
         let total = step_total.swap(0, Ordering::Relaxed).max(1) as f32;
         let action_frac: [f32; ACTION_LOG_BUCKETS] =
             std::array::from_fn(|i| action_counts[i].swap(0, Ordering::Relaxed) as f32 / total);
@@ -468,7 +498,7 @@ fn main() {
             });
         }
 
-        if stats.iteration % CHECKPOINT_EVERY == 0 {
+        if stats.iteration.is_multiple_of(CHECKPOINT_EVERY) {
             let path = checkpoint_dir.join(format!("iter_{:05}", stats.iteration));
             match net.clone().save_file(&path, &recorder) {
                 Ok(()) => eprintln!("checkpoint: saved {}", path.display()),

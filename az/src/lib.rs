@@ -22,7 +22,7 @@ pub mod net;
 pub use mcts::{ActionDistribution, ActionPolicy, Leaf, Tree};
 pub use net::{ResNet, ResNetConfig};
 
-const NUM_EVALUATORS: usize = 2;
+const NUM_EVALUATORS: usize = 4;
 
 pub trait Game<const ACT: usize, const OBS: usize, const PLAYERS: usize>:
     Clone + Send + Sync
@@ -395,7 +395,7 @@ where
 
         on_iteration(
             &IterationStats {
-                iteration: iteration + 1,
+                iteration,
                 new_samples: new_samples.load(Ordering::Relaxed),
                 buffer_size: buffer.len(),
                 policy_loss: last_policy_loss,

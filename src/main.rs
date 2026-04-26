@@ -95,7 +95,7 @@ fn action_log_bucket(a: Action) -> usize {
 }
 
 const ACTION_BUCKET_LABELS: [&str; ACTION_LOG_BUCKETS] = [
-    "end", "bank", "set", "road", "city", "bdev", "knight", "odev", "roll", "rob", "disc",
+    "end", "bank", "settle", "road", "city", "bdev", "knight", "odev", "roll", "rob", "disc",
 ];
 
 fn encode_relation(r: PlayerRelation) -> (f32, f32) {
@@ -362,7 +362,7 @@ fn main() {
     let action_counts: [AtomicU64; ACTION_LOG_BUCKETS] = std::array::from_fn(|_| AtomicU64::new(0));
     let phase_counts: [AtomicU64; CATAN_PHASE_BUCKETS] = std::array::from_fn(|_| AtomicU64::new(0));
     let step_total = AtomicU64::new(0);
-    let mut action_ema = [0.0f32; ACTION_LOG_BUCKETS];
+    let mut action_ema: Option<[f32; ACTION_LOG_BUCKETS]> = None;
 
     let on_step = |info: &SelfPlayStepInfo<CatanGame, ACT, OBS, PLAYERS>| {
         let ab = action_log_bucket(info.action);
@@ -379,13 +379,14 @@ fn main() {
         let phase_frac: [f32; CATAN_PHASE_BUCKETS] =
             std::array::from_fn(|i| phase_counts[i].swap(0, Ordering::Relaxed) as f32 / total);
 
+        let ema = action_ema.get_or_insert(action_frac);
         for i in 0..ACTION_LOG_BUCKETS {
-            action_ema[i] = EMA_ALPHA * action_frac[i] + (1.0 - EMA_ALPHA) * action_ema[i];
+            ema[i] = EMA_ALPHA * action_frac[i] + (1.0 - EMA_ALPHA) * ema[i];
         }
 
         let action_str = ACTION_BUCKET_LABELS
             .iter()
-            .zip(action_ema.iter())
+            .zip(ema.iter())
             .map(|(l, f)| format!("{l}={f:.2}"))
             .collect::<Vec<_>>()
             .join(" ");
@@ -437,7 +438,7 @@ fn main() {
             data.insert("gpu/leaves".into(), stats.gpu_leaves.into());
             data.insert("gpu/avg_batch".into(), (avg_batch as f64).into());
             data.insert("gpu/leaves_per_sec".into(), (leaves_per_sec as f64).into());
-            for (label, frac) in ACTION_BUCKET_LABELS.iter().zip(action_ema.iter()) {
+            for (label, frac) in ACTION_BUCKET_LABELS.iter().zip(action_frac.iter()) {
                 data.insert(format!("action/{label}"), (*frac as f64).into());
             }
             for (i, frac) in phase_frac.iter().enumerate() {

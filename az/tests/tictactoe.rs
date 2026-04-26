@@ -128,7 +128,7 @@ fn end_to_end() {
             ..Default::default()
         },
         device,
-        |stats: &IterationStats| {
+        |stats: &IterationStats, _net: &_| {
             eprintln!(
                 "az iteration {}: {} new samples, buffer={}, policy_loss={:.4}, value_loss={:.4}, total_loss={:.4}, elapsed={:.2}s",
                 stats.iteration,

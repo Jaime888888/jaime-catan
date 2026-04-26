@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use az::{Game, IterationStats, ResNet, ResNetConfig, SelfPlayStepInfo, TrainConfig, train};
 use burn::backend::Autodiff;
+use burn::module::Module;
+use burn::record::{BinFileRecorder, FullPrecisionSettings};
 use burn::tensor::backend::Backend;
 use catan_sim::{
     ACTION_SPACE_SIZE, Action, ObsEdge, ObsVertex, Phase, PlayerId, PlayerRelation, Port, Turn,
@@ -357,6 +359,15 @@ fn main() {
     // the single-threaded `on_iteration` closure drains them at iteration
     // boundaries and updates an EMA over action-family fractions.
     const CATAN_PHASE_BUCKETS: usize = 7;
+    const PHASE_BUCKET_LABELS: [&str; CATAN_PHASE_BUCKETS] = [
+        "setup",
+        "preroll",
+        "discard",
+        "robber",
+        "main",
+        "roadbuilding",
+        "gameover",
+    ];
     const EMA_ALPHA: f32 = 0.1;
 
     let action_counts: [AtomicU64; ACTION_LOG_BUCKETS] = std::array::from_fn(|_| AtomicU64::new(0));
@@ -372,7 +383,12 @@ fn main() {
         step_total.fetch_add(1, Ordering::Relaxed);
     };
 
-    let on_iter = |stats: &IterationStats| {
+    const CHECKPOINT_EVERY: usize = 10;
+    let checkpoint_dir = std::path::PathBuf::from("checkpoints");
+    std::fs::create_dir_all(&checkpoint_dir).expect("create checkpoint dir");
+    let recorder = BinFileRecorder::<FullPrecisionSettings>::new();
+
+    let on_iter = |stats: &IterationStats, net: &ResNet<B>| {
         let total = step_total.swap(0, Ordering::Relaxed).max(1) as f32;
         let action_frac: [f32; ACTION_LOG_BUCKETS] =
             std::array::from_fn(|i| action_counts[i].swap(0, Ordering::Relaxed) as f32 / total);
@@ -390,10 +406,10 @@ fn main() {
             .map(|(l, f)| format!("{l}={f:.2}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let phase_str = phase_frac
+        let phase_str = PHASE_BUCKET_LABELS
             .iter()
-            .enumerate()
-            .map(|(i, f)| format!("p{i}={f:.2}"))
+            .zip(phase_frac.iter())
+            .map(|(l, f)| format!("{l}={f:.2}"))
             .collect::<Vec<_>>()
             .join(" ");
 
@@ -441,8 +457,8 @@ fn main() {
             for (label, frac) in ACTION_BUCKET_LABELS.iter().zip(action_frac.iter()) {
                 data.insert(format!("action/{label}"), (*frac as f64).into());
             }
-            for (i, frac) in phase_frac.iter().enumerate() {
-                data.insert(format!("phase/p{i}"), (*frac as f64).into());
+            for (label, frac) in PHASE_BUCKET_LABELS.iter().zip(phase_frac.iter()) {
+                data.insert(format!("phase/{label}"), (*frac as f64).into());
             }
 
             let run = Arc::clone(run);
@@ -450,6 +466,14 @@ fn main() {
             handle.spawn(async move {
                 run.log(log_data).await;
             });
+        }
+
+        if stats.iteration % CHECKPOINT_EVERY == 0 {
+            let path = checkpoint_dir.join(format!("iter_{:05}", stats.iteration));
+            match net.clone().save_file(&path, &recorder) {
+                Ok(()) => eprintln!("checkpoint: saved {}", path.display()),
+                Err(e) => eprintln!("checkpoint: failed to save {}: {e}", path.display()),
+            }
         }
     };
 

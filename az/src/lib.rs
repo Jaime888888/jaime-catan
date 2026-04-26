@@ -134,7 +134,7 @@ pub fn train<B, N, G, const ACT: usize, const OBS: usize, const PLAYERS: usize>(
     game_factory: impl Fn() -> G + Sync,
     config: TrainConfig,
     device: B::Device,
-    mut on_iteration: impl FnMut(&IterationStats),
+    mut on_iteration: impl FnMut(&IterationStats, &N),
     on_self_play_step: impl Fn(&SelfPlayStepInfo<G, ACT, OBS, PLAYERS>) + Sync,
 ) -> N
 where
@@ -393,17 +393,20 @@ where
             }
         }
 
-        on_iteration(&IterationStats {
-            iteration: iteration + 1,
-            new_samples: new_samples.load(Ordering::Relaxed),
-            buffer_size: buffer.len(),
-            policy_loss: last_policy_loss,
-            value_loss: last_value_loss,
-            total_loss: last_total_loss,
-            elapsed_secs: iter_start.elapsed().as_secs_f32(),
-            gpu_dispatches: gpu_dispatches.load(Ordering::Relaxed),
-            gpu_leaves: gpu_leaves.load(Ordering::Relaxed),
-        });
+        on_iteration(
+            &IterationStats {
+                iteration: iteration + 1,
+                new_samples: new_samples.load(Ordering::Relaxed),
+                buffer_size: buffer.len(),
+                policy_loss: last_policy_loss,
+                value_loss: last_value_loss,
+                total_loss: last_total_loss,
+                elapsed_secs: iter_start.elapsed().as_secs_f32(),
+                gpu_dispatches: gpu_dispatches.load(Ordering::Relaxed),
+                gpu_leaves: gpu_leaves.load(Ordering::Relaxed),
+            },
+            &net,
+        );
     }
 
     net

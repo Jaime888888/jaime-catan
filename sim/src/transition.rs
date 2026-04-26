@@ -233,6 +233,7 @@ impl<'a> PlayerTurn<'a> {
                     _ => unreachable!(),
                 }
                 game.compute_longest_road();
+                game.check_victory();
             }
             Action::PlaceRoad(e) => {
                 game.board.edges[e.idx()] = Edge::Road(pid);
@@ -275,6 +276,7 @@ impl<'a> PlayerTurn<'a> {
                     _ => unreachable!(),
                 }
                 game.compute_longest_road();
+                game.check_victory();
             }
             Action::BuildCity(v) => {
                 game.pay(pid, CITY_COST);
@@ -419,6 +421,7 @@ impl<'a> PlayerTurn<'a> {
                 game.turn_number += 1;
                 game.turn_flags = TurnFlags::default();
                 game.phase = Phase::PreRoll;
+                game.check_victory();
             }
         }
 
@@ -528,12 +531,16 @@ impl Game {
     }
 
     fn check_victory(&mut self) {
-        if !matches!(self.phase, Phase::GameOver { .. })
-            && self.victory_points(self.current_player) >= 10
-        {
-            self.phase = Phase::GameOver {
-                winner: self.current_player,
-            };
+        if matches!(self.phase, Phase::GameOver { .. }) {
+            return;
+        }
+        // Scan everyone: VP can depend on longest road (recomputed after builds), and
+        // `current_player` alone is wrong after `EndTurn` if a win was missed earlier.
+        for pid in PlayerId::ALL {
+            if self.victory_points(pid) >= 10 {
+                self.phase = Phase::GameOver { winner: pid };
+                return;
+            }
         }
     }
 

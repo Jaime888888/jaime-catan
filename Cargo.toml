@@ -18,6 +18,7 @@ catan-sim = { path = "sim" }
 az = { path = "az" }
 rand = { workspace = true }
 rand_chacha = "0.10.0"
+mimalloc = { version = "0.1", default-features = false }
 burn = { version = "0.20", default-features = false, features = [
     "std",
     "autodiff",

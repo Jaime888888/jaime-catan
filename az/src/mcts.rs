@@ -1,17 +1,18 @@
 use crate::Game;
 use rand::RngExt;
+use rand_distr::{Distribution, multi::Dirichlet};
 
-pub struct ActionDistribution<const ACT: usize> {
-    pub visits: [u32; ACT],
-}
+pub struct ActionDistribution<const ACT: usize>(pub [u32; ACT]);
+
+pub struct ActionPolicy<const ACT: usize>(pub [f32; ACT]);
 
 impl<const ACT: usize> ActionDistribution<ACT> {
-    pub fn policy(&self, temperature: f32) -> [f32; ACT] {
+    pub fn policy(&self, temperature: f32) -> ActionPolicy<ACT> {
+        let ActionDistribution(visits) = self;
         let mut out = [0.0f32; ACT];
 
         if temperature < 1e-6 {
-            let best = self
-                .visits
+            let best = visits
                 .iter()
                 .enumerate()
                 .filter(|&(_, &n)| n > 0)
@@ -20,25 +21,28 @@ impl<const ACT: usize> ActionDistribution<ACT> {
             if let Some(i) = best {
                 out[i] = 1.0;
             }
-            return out;
+
+            return ActionPolicy(out);
         }
 
         let inv_t = 1.0 / temperature;
-        let sum: f32 = self.visits.iter().map(|&n| (n as f32).powf(inv_t)).sum();
+        let sum: f32 = visits.iter().map(|&n| (n as f32).powf(inv_t)).sum();
 
         if sum < 1e-8 {
-            return out;
+            return ActionPolicy(out);
         }
 
-        for (i, &n) in self.visits.iter().enumerate() {
+        for (i, &n) in visits.iter().enumerate() {
             out[i] = (n as f32).powf(inv_t) / sum;
         }
 
-        out
+        ActionPolicy(out)
     }
+}
 
-    pub fn pick(&self, temperature: f32, rng: &mut impl rand::Rng) -> usize {
-        let policy = self.policy(temperature);
+impl<const ACT: usize> ActionPolicy<ACT> {
+    pub fn pick(&self, rng: &mut impl rand::Rng) -> usize {
+        let ActionPolicy(policy) = self;
         let r: f32 = rng.random_range(0.0..1.0);
         let mut cum = 0.0;
         let mut last_nonzero = 0;
@@ -90,6 +94,7 @@ impl<const PLAYERS: usize> Node<PLAYERS> {
         } else {
             self.value_sum / self.visit_count as f32
         };
+
         q + c_puct * self.prior * sqrt_parent / (1.0 + self.visit_count as f32)
     }
 }
@@ -106,17 +111,13 @@ pub struct Leaf<G> {
 
 impl<const ACT: usize, const PLAYERS: usize> Default for Tree<ACT, PLAYERS> {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<const ACT: usize, const PLAYERS: usize> Tree<ACT, PLAYERS> {
-    pub fn new() -> Self {
         let mut nodes = Vec::with_capacity(ACT * 1024);
         nodes.push(Node::new(1.0, 0));
         Self { nodes }
     }
+}
 
+impl<const ACT: usize, const PLAYERS: usize> Tree<ACT, PLAYERS> {
     /// Walk from root to a leaf via PUCT selection. Known-terminal
     /// nodes are backpropped directly without cloning the game state.
     /// Non-terminal leaves are returned for network evaluation +
@@ -151,6 +152,7 @@ impl<const ACT: usize, const PLAYERS: usize> Tree<ACT, PLAYERS> {
                     if node.children.is_empty() {
                         break;
                     }
+
                     let sqrt_parent = (node.visit_count as f32).sqrt();
                     let &(action_idx, child_id) = node
                         .children
@@ -188,19 +190,21 @@ impl<const ACT: usize, const PLAYERS: usize> Tree<ACT, PLAYERS> {
         })
     }
 
-    /// Expand a non-terminal leaf: create children from legal actions
-    /// with priors derived from `policy` logits, then backprop `values`.
+    /// Expand a leaf: softmax network prior over legal moves, backprop value.
+    /// At the root (`node_id == 0`), optionally blend in `η ~ Dirichlet(α,…,α)` (AlphaZero-style).
     pub fn expand<G, const OBS: usize>(
         &mut self,
         leaf: &Leaf<G>,
         policy: &[f32; ACT],
         values: [f32; PLAYERS],
+        root_dirichlet_epsilon: f32,
+        root_dirichlet_alpha: f32,
     ) where
         G: Game<ACT, OBS, PLAYERS>,
     {
-        let nid = leaf.node_id as usize;
-        self.nodes[nid].state = NodeState::Interior;
-        self.nodes[nid].acting_player = G::player_to_index(leaf.state.current_player());
+        let node_id = leaf.node_id as usize;
+        self.nodes[node_id].state = NodeState::Interior;
+        self.nodes[node_id].acting_player = G::player_to_index(leaf.state.current_player());
 
         let legal = leaf.state.legal_actions();
         debug_assert!(!legal.is_empty(), "expand called with no legal actions");
@@ -213,15 +217,30 @@ impl<const ACT: usize, const PLAYERS: usize> Tree<ACT, PLAYERS> {
             .map(|&a| (policy[G::action_to_index(a)] - max_logit).exp())
             .sum();
 
-        let mut children = Vec::with_capacity(legal.len());
-        for &action in &legal {
+        let root_dirichlet = if node_id == 0 && legal.len() > 1 {
+            let epsilon = root_dirichlet_epsilon.clamp(0.0, 1.0);
+
+            let concentration = vec![root_dirichlet_alpha; legal.len()];
+            let dist = Dirichlet::new(&concentration).unwrap();
+
+            Some((epsilon, dist.sample(&mut rand::rng())))
+        } else {
+            None
+        };
+
+        self.nodes[node_id].children = Vec::with_capacity(legal.len());
+        for (i, &action) in legal.iter().enumerate() {
             let idx = G::action_to_index(action);
-            let prior = (policy[idx] - max_logit).exp() / exp_sum;
+            let mut prior = (policy[idx] - max_logit).exp() / exp_sum;
+
+            if let Some((epsilon, eta)) = root_dirichlet.as_ref() {
+                prior = (1.0 - *epsilon) * prior + *epsilon * eta[i];
+            }
+
             let child_id = self.nodes.len() as u32;
             self.nodes.push(Node::new(prior, 0));
-            children.push((idx as u16, child_id));
+            self.nodes[node_id].children.push((idx as u16, child_id));
         }
-        self.nodes[nid].children = children;
 
         for &node_id in leaf.path.iter().rev() {
             let node = &mut self.nodes[node_id as usize];
@@ -246,6 +265,11 @@ impl<const ACT: usize, const PLAYERS: usize> Tree<ACT, PLAYERS> {
             visits[action_idx as usize] = self.nodes[child_id as usize].visit_count;
         }
 
-        ActionDistribution { visits }
+        ActionDistribution(visits)
+    }
+
+    pub fn clear(&mut self) {
+        self.nodes.clear();
+        self.nodes.push(Node::new(1.0, 0));
     }
 }

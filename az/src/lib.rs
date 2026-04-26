@@ -1,11 +1,12 @@
 use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::hash::Hash;
-use std::sync::mpsc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use flume::RecvTimeoutError;
 use rand::RngExt;
-use rayon::prelude::*;
 
 use burn::{
     Tensor,
@@ -18,8 +19,10 @@ use burn::{
 pub mod mcts;
 pub mod net;
 
-pub use mcts::{ActionDistribution, Leaf, Tree};
+pub use mcts::{ActionDistribution, ActionPolicy, Leaf, Tree};
 pub use net::{ResNet, ResNetConfig};
+
+const NUM_EVALUATORS: usize = 2;
 
 pub trait Game<const ACT: usize, const OBS: usize, const PLAYERS: usize>:
     Clone + Send + Sync
@@ -50,38 +53,6 @@ pub struct Sample<const ACT: usize, const OBS: usize, const PLAYERS: usize> {
     pub value_target: [f32; PLAYERS],
 }
 
-fn evaluate_batch<B, N, const ACT: usize, const OBS: usize, const PLAYERS: usize>(
-    net: &N,
-    device: &B::Device,
-    observations: &[[f32; OBS]],
-) -> Vec<([f32; ACT], [f32; PLAYERS])>
-where
-    B: Backend,
-    N: AZNet<B>,
-{
-    let bs = observations.len();
-    assert!(bs > 0, "evaluate_batch: empty observations");
-    let flat: Vec<f32> = observations
-        .iter()
-        .flat_map(|o| o.iter().copied())
-        .collect();
-    let tensor: Tensor<B, 2> = Tensor::from_data(TensorData::new(flat, [bs, OBS]), device);
-    let (policy_logits, values) = net.forward(tensor);
-
-    let policy_data: Vec<f32> = policy_logits.into_data().to_vec().expect("policy to vec");
-    let value_data: Vec<f32> = values.into_data().to_vec().expect("value to vec");
-
-    (0..bs)
-        .map(|i| {
-            let mut policy = [0.0f32; ACT];
-            policy.copy_from_slice(&policy_data[i * ACT..(i + 1) * ACT]);
-            let mut vals = [0.0f32; PLAYERS];
-            vals.copy_from_slice(&value_data[i * PLAYERS..(i + 1) * PLAYERS]);
-            (policy, vals)
-        })
-        .collect()
-}
-
 #[derive(Clone)]
 pub struct TrainConfig {
     pub iterations: usize,
@@ -92,27 +63,31 @@ pub struct TrainConfig {
     pub training_steps_per_iteration: usize,
     pub learning_rate: f64,
 
-    pub max_simulations: u32,
-    pub sims_per_eval: u32,
+    pub max_simulations: usize,
+    pub sims_per_eval: usize,
     pub c_puct: f32,
     pub temperature: f32,
+    pub root_dirichlet_epsilon: f32,
+    pub root_dirichlet_alpha: f32,
+    pub max_plies_per_game: Option<usize>,
 }
 
 impl Default for TrainConfig {
     fn default() -> Self {
         Self {
             iterations: 100,
-
             games_per_iteration: 100,
             batch_size: 64,
             replay_capacity: 50_000,
             training_steps_per_iteration: 100,
             learning_rate: 1e-3,
-
             max_simulations: 800,
             sims_per_eval: 8,
             c_puct: 1.5,
             temperature: 1.0,
+            root_dirichlet_epsilon: 0.25,
+            root_dirichlet_alpha: 0.3,
+            max_plies_per_game: None,
         }
     }
 }
@@ -126,14 +101,41 @@ pub struct IterationStats {
     pub value_loss: f32,
     pub total_loss: f32,
     pub elapsed_secs: f32,
+    /// Total GPU eval dispatches across all evaluators this iteration.
+    pub gpu_dispatches: u64,
+    /// Total leaves (rows in the forward pass) across all evaluators this iteration.
+    pub gpu_leaves: u64,
 }
 
-pub fn train_loop<B, N, G, const ACT: usize, const OBS: usize, const PLAYERS: usize>(
+/// Passed to `on_self_play_step` once per ply, from the player thread that
+/// owns the game. Fired after MCTS and action selection, before `apply`, so
+/// `game` reflects the state the action was chosen from. Called concurrently
+/// across player threads; the closure must be `Sync`.
+pub struct SelfPlayStepInfo<'a, G, const ACT: usize, const OBS: usize, const PLAYERS: usize>
+where
+    G: Game<ACT, OBS, PLAYERS>,
+{
+    pub iteration: usize,
+    pub game_idx: usize,
+    pub ply: usize,
+    pub game: &'a G,
+    pub action: G::Action,
+    pub policy: &'a ActionPolicy<ACT>,
+}
+
+struct EvalRequest<const ACT: usize, const PLAYERS: usize> {
+    obs: Vec<f32>,
+    bs: usize,
+    reply: oneshot::Sender<Vec<([f32; ACT], [f32; PLAYERS])>>,
+}
+
+pub fn train<B, N, G, const ACT: usize, const OBS: usize, const PLAYERS: usize>(
     mut net: N,
-    game_factory: impl Fn() -> G,
+    game_factory: impl Fn() -> G + Sync,
     config: TrainConfig,
     device: B::Device,
     mut on_iteration: impl FnMut(&IterationStats),
+    on_self_play_step: impl Fn(&SelfPlayStepInfo<G, ACT, OBS, PLAYERS>) + Sync,
 ) -> N
 where
     B: AutodiffBackend,
@@ -141,170 +143,211 @@ where
     N::InnerModule: AZNet<B::InnerBackend> + 'static,
     G: Game<ACT, OBS, PLAYERS>,
 {
-    let mut buffer = ReplayBuffer::<ACT, OBS, PLAYERS>::new(config.replay_capacity);
+    let on_self_play_step = &on_self_play_step;
+    let replay_buffer = Arc::new(Mutex::new(ReplayBuffer::<ACT, OBS, PLAYERS>::new(
+        config.replay_capacity,
+    )));
+
     let mut optim = AdamConfig::new().init::<B, N>();
     let mut rng = rand::rng();
 
     for iteration in 0..config.iterations {
         let iter_start = Instant::now();
-        let n = config.games_per_iteration;
+        let new_samples = Arc::new(AtomicUsize::new(0));
+        let gpu_dispatches = Arc::new(AtomicU64::new(0));
+        let gpu_leaves = Arc::new(AtomicU64::new(0));
 
-        let (mut games, mut trees): (Vec<_>, Vec<_>) =
-            (0..n).map(|_| (game_factory(), Tree::new())).unzip();
-        let mut histories: Vec<Vec<_>> = (0..n).map(|_| Vec::new()).collect();
-        let mut samples: Vec<Sample<ACT, OBS, PLAYERS>> = Vec::new();
+        std::thread::scope(|s| {
+            let evaluators = (0..NUM_EVALUATORS)
+                .map(|i| {
+                    let (tx, rx) = flume::unbounded::<EvalRequest<ACT, PLAYERS>>();
 
-        let (tx_obs, rx_obs) = mpsc::channel::<Vec<[f32; OBS]>>();
-        let (tx_results, rx_results) = mpsc::channel::<Vec<([f32; ACT], [f32; PLAYERS])>>();
+                    let live = Arc::new(AtomicUsize::new(
+                        config.games_per_iteration / NUM_EVALUATORS
+                            + (i < config.games_per_iteration % NUM_EVALUATORS) as usize,
+                    ));
 
-        let gpu_net = net.clone().valid();
-        let gpu_dev = device.clone();
-        let gpu_thread = std::thread::spawn(move || {
-            while let Ok(obs) = rx_obs.recv() {
-                let results = evaluate_batch::<B::InnerBackend, N::InnerModule, ACT, OBS, PLAYERS>(
-                    &gpu_net, &gpu_dev, &obs,
-                );
-                tx_results.send(results).expect("results receiver alive");
+                    let net_clone = net.clone().valid();
+                    let device_clone = device.clone();
+                    let live_clone = live.clone();
+                    let gpu_dispatches_clone = gpu_dispatches.clone();
+                    let gpu_leaves_clone = gpu_leaves.clone();
+                    s.spawn(move || {
+                        let mut requests = Vec::new();
+
+                        while let Ok(first) = rx.recv() {
+                            let mut flat = Vec::new();
+                            flat.extend_from_slice(&first.obs);
+                            requests.push(first);
+
+                            loop {
+                                if requests.len() >= live_clone.load(Ordering::Relaxed) {
+                                    break;
+                                }
+
+                                match rx.recv_deadline(Instant::now() + Duration::from_micros(200))
+                                {
+                                    Ok(req) => {
+                                        flat.extend_from_slice(&req.obs);
+                                        requests.push(req);
+                                    }
+                                    Err(RecvTimeoutError::Disconnected) => break,
+                                    Err(RecvTimeoutError::Timeout) => continue,
+                                }
+                            }
+
+                            let bs_total: usize = requests.iter().map(|r| r.bs).sum();
+                            gpu_dispatches_clone.fetch_add(1, Ordering::Relaxed);
+                            gpu_leaves_clone.fetch_add(bs_total as u64, Ordering::Relaxed);
+
+                            let tensor: Tensor<B::InnerBackend, 2> = Tensor::from_data(
+                                TensorData::new(flat, [bs_total, OBS]),
+                                &device_clone,
+                            );
+
+                            let (policy, values) = net_clone.forward(tensor);
+
+                            let pol = policy.into_data().to_vec().expect("policy to vec");
+                            let val = values.into_data().to_vec().expect("value to vec");
+
+                            let mut row = 0usize;
+                            for req in requests.drain(..) {
+                                let mut out = Vec::with_capacity(req.bs);
+                                for i in 0..req.bs {
+                                    let r = row + i;
+                                    let mut p = [0.0f32; ACT];
+                                    p.copy_from_slice(&pol[r * ACT..(r + 1) * ACT]);
+                                    let mut v = [0.0f32; PLAYERS];
+                                    v.copy_from_slice(&val[r * PLAYERS..(r + 1) * PLAYERS]);
+                                    out.push((p, v));
+                                }
+                                let _ = req.reply.send(out);
+                                row += req.bs;
+                            }
+                        }
+                    });
+
+                    (tx, live)
+                })
+                .collect::<Vec<_>>();
+
+            for game_idx in 0..config.games_per_iteration {
+                let (tx, live) = evaluators[game_idx % NUM_EVALUATORS].clone();
+                let mut game = game_factory();
+
+                let replay_buffer_clone = replay_buffer.clone();
+                let new_samples_clone = new_samples.clone();
+
+                s.spawn(move || {
+                    struct LiveGuard(Arc<AtomicUsize>);
+
+                    impl Drop for LiveGuard {
+                        fn drop(&mut self) {
+                            self.0.fetch_sub(1, Ordering::Relaxed);
+                        }
+                    }
+
+                    let _live_guard = LiveGuard(live.clone());
+
+                    let mut history = Vec::new();
+                    let mut plies = 0usize;
+                    let mut rng = rand::rng();
+
+                    let mut tree = Tree::<ACT, PLAYERS>::default();
+                    let mut leaves = Vec::with_capacity(config.sims_per_eval);
+
+                    loop {
+                        for _ in 0..config.max_simulations.div_ceil(config.sims_per_eval) {
+                            let mut obs_flat = Vec::with_capacity(config.sims_per_eval * OBS);
+                            for _ in 0..config.sims_per_eval {
+                                if let Some(leaf) = tree.select::<G, OBS>(&game, config.c_puct) {
+                                    obs_flat.extend_from_slice(&leaf.state.observe());
+                                    leaves.push(leaf);
+                                }
+                            }
+                            if leaves.is_empty() {
+                                break;
+                            }
+
+                            let (reply_tx, reply_rx) = oneshot::channel();
+
+                            if tx
+                                .send(EvalRequest {
+                                    obs: obs_flat,
+                                    bs: leaves.len(),
+                                    reply: reply_tx,
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+
+                            let Ok(results) = reply_rx.recv() else {
+                                return;
+                            };
+
+                            for (leaf, (policy, values)) in leaves.iter().zip(results) {
+                                tree.expand::<G, OBS>(
+                                    leaf,
+                                    &policy,
+                                    values,
+                                    config.root_dirichlet_epsilon,
+                                    config.root_dirichlet_alpha,
+                                );
+                            }
+
+                            leaves.clear();
+                        }
+
+                        let obs = game.observe();
+                        let policy = tree.action_distribution().policy(config.temperature);
+                        tree.clear();
+
+                        if policy.0.iter().all(|&p| p == 0.0) {
+                            return;
+                        }
+
+                        let action = G::index_to_action(policy.pick(&mut rng));
+                        on_self_play_step(&SelfPlayStepInfo {
+                            iteration,
+                            game_idx,
+                            ply: plies,
+                            game: &game,
+                            action,
+                            policy: &policy,
+                        });
+
+                        game.apply(action);
+                        history.push((obs, policy, game.current_player()));
+                        plies += 1;
+
+                        if game.is_terminal() {
+                            let value_target =
+                                std::array::from_fn(|p| game.result(G::index_to_player(p)));
+
+                            new_samples_clone.fetch_add(history.len(), Ordering::Relaxed);
+
+                            let mut buffer = replay_buffer_clone.lock().unwrap();
+                            buffer.extend(history.into_iter().map(|(obs, pol, _)| Sample {
+                                observation: obs,
+                                policy_target: pol.0,
+                                value_target,
+                            }));
+
+                            return;
+                        } else if config.max_plies_per_game.is_some_and(|c| plies >= c) {
+                            return;
+                        }
+                    }
+                });
             }
         });
 
-        while !games.is_empty() {
-            let spe = config.sims_per_eval as usize;
-            let outer_rounds = (config.max_simulations as usize).div_ceil(spe);
-            let n_games = games.len();
-            let c_puct = config.c_puct;
-
-            let mut prev: Option<Vec<(usize, Leaf<G>)>> = None;
-
-            for round in 0..=outer_rounds {
-                let (pending, obs) = if round < outer_rounds {
-                    let batched: Vec<Vec<_>> = trees
-                        .par_iter_mut()
-                        .zip(games.par_iter())
-                        .map(|(tree, game)| {
-                            (0..spe)
-                                .filter_map(|_| {
-                                    tree.select::<G, OBS>(game, c_puct).map(|leaf| {
-                                        let obs = leaf.state.observe();
-                                        (leaf, obs)
-                                    })
-                                })
-                                .collect()
-                        })
-                        .collect();
-                    let mut pending = Vec::new();
-                    let mut obs = Vec::new();
-                    for (i, group) in batched.into_iter().enumerate() {
-                        for (leaf, o) in group {
-                            pending.push((i, leaf));
-                            obs.push(o);
-                        }
-                    }
-                    (pending, obs)
-                } else {
-                    (Vec::new(), Vec::new())
-                };
-
-                let pending_and_evals = prev.take().map(|prev_pending| {
-                    let evals = rx_results.recv().expect("gpu thread alive");
-                    (prev_pending, evals)
-                });
-
-                if round < outer_rounds && !obs.is_empty() {
-                    tx_obs.send(obs).expect("gpu thread alive");
-                    prev = Some(pending);
-                }
-
-                if let Some((prev_pending, evals)) = pending_and_evals {
-                    debug_assert_eq!(
-                        prev_pending.len(),
-                        evals.len(),
-                        "MCTS pending leaves must match network batch size"
-                    );
-                    let mut groups: Vec<Vec<_>> = (0..n_games).map(|_| Vec::new()).collect();
-                    for ((i, leaf), (policy, values)) in prev_pending.into_iter().zip(evals) {
-                        groups[i].push((leaf, policy, values));
-                    }
-                    trees
-                        .par_iter_mut()
-                        .zip(groups.into_par_iter())
-                        .for_each(|(tree, group)| {
-                            for (ref leaf, ref policy, values) in group {
-                                tree.expand::<G, OBS>(leaf, policy, values);
-                            }
-                        });
-                }
-            }
-
-            // Pick moves from the search distributions.
-            let move_data: Vec<_> = games
-                .par_iter()
-                .zip(trees.par_iter())
-                .map(|(game, tree)| {
-                    let dist = tree.action_distribution();
-                    let obs = game.observe();
-                    let policy = dist.policy(config.temperature);
-                    let player = game.current_player();
-                    let has_root_visits = dist.visits.iter().any(|&v| v > 0);
-                    let action = if has_root_visits {
-                        G::index_to_action(dist.pick(config.temperature, &mut rand::rng()))
-                    } else {
-                        // If search produced no root visits for this game,
-                        // fall back to a random legal action instead of
-                        // deterministically picking index 0.
-                        let legal = game.legal_actions();
-                        debug_assert!(
-                            !legal.is_empty(),
-                            "non-terminal game must have legal actions"
-                        );
-                        let mut rng = rand::rng();
-                        legal[rng.random_range(0..legal.len())]
-                    };
-                    (obs, policy, player, action, has_root_visits)
-                })
-                .collect();
-
-            for (i, (obs, policy, player, action, _has_root_visits)) in
-                move_data.into_iter().enumerate()
-            {
-                histories[i].push((obs, policy, player));
-                games[i].apply(action);
-            }
-
-            // Retire finished games and reset trees for ongoing ones.
-            let mut i = games.len();
-            while i > 0 {
-                i -= 1;
-                let is_terminal = games[i].is_terminal();
-                if is_terminal {
-                    let game = games.swap_remove(i);
-                    trees.swap_remove(i);
-                    let game_history = histories.swap_remove(i);
-                    let result: [f32; PLAYERS] =
-                        std::array::from_fn(|p| game.result(G::index_to_player(p)));
-                    samples.extend(game_history.into_iter().map(|(obs, pol, _player)| Sample {
-                        observation: obs,
-                        policy_target: pol,
-                        value_target: result,
-                    }));
-                } else {
-                    trees[i] = Tree::new();
-                }
-            }
-
-        }
-
-        drop(tx_obs);
-        gpu_thread.join().expect("gpu thread panicked");
-
-        let num_samples = samples.len();
-        buffer.extend(samples);
-
-        // Training phase.
         let mut last_policy_loss = 0.0f32;
         let mut last_value_loss = 0.0f32;
         let mut last_total_loss = 0.0f32;
 
+        let buffer = replay_buffer.lock().unwrap();
         if buffer.len() >= config.batch_size {
             for _ in 0..config.training_steps_per_iteration {
                 let batch = buffer.sample_batch(config.batch_size, &mut rng);
@@ -352,19 +395,19 @@ where
 
         on_iteration(&IterationStats {
             iteration: iteration + 1,
-            new_samples: num_samples,
+            new_samples: new_samples.load(Ordering::Relaxed),
             buffer_size: buffer.len(),
             policy_loss: last_policy_loss,
             value_loss: last_value_loss,
             total_loss: last_total_loss,
             elapsed_secs: iter_start.elapsed().as_secs_f32(),
+            gpu_dispatches: gpu_dispatches.load(Ordering::Relaxed),
+            gpu_leaves: gpu_leaves.load(Ordering::Relaxed),
         });
     }
 
     net
 }
-
-// ── Replay buffer ────────────────────────────────────────────────────────────
 
 struct ReplayBuffer<const ACT: usize, const OBS: usize, const PLAYERS: usize> {
     buf: VecDeque<Sample<ACT, OBS, PLAYERS>>,

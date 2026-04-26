@@ -325,7 +325,9 @@ fn bank_trade_respects_port_rates() {
 
     let pi = game.current_player.idx();
 
-    // No ports: need 4 to trade
+    // No ports: need 4 to trade (setup RNG may otherwise grant port access).
+    game.players[pi].has_three_to_one_port = false;
+    game.players[pi].two_to_one_ports = [false; 5];
     game.players[pi].resources = ResourceBank([3, 0, 0, 0, 0]);
     match game.turn() {
         Turn::Player(turn) => {

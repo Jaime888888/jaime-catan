@@ -6,7 +6,10 @@ edition = "2024"
 [dependencies]
 burn = "0.20"
 rand = { workspace = true }
+rand_distr = "0.6"
 rayon = "1"
+flume = "0.12"
+oneshot = { version = "0.2", features = ["std"] }
 
 [dev-dependencies]
 burn = { version = "0.20", features = ["ndarray", "autodiff"] }

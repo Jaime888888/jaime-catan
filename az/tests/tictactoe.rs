@@ -1,5 +1,5 @@
 use az::net::{ResNet, ResNetConfig};
-use az::{Game, IterationStats, TrainConfig, train_loop};
+use az::{Game, IterationStats, TrainConfig, train};
 use burn::backend::{Autodiff, NdArray};
 
 const ACT: usize = 9;
@@ -120,7 +120,7 @@ fn end_to_end() {
         &device,
     );
 
-    let _trained = train_loop::<B, _, TicTacToe, ACT, OBS, PLAYERS>(
+    let _trained = train::<B, _, TicTacToe, ACT, OBS, PLAYERS>(
         net,
         TicTacToe::new,
         TrainConfig {
@@ -140,5 +140,6 @@ fn end_to_end() {
                 stats.elapsed_secs,
             )
         },
+        |_| {},
     );
 }

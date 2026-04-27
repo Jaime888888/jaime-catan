@@ -105,6 +105,18 @@ pub struct IterationStats {
     pub gpu_dispatches: u64,
     /// Total leaves (rows in the forward pass) across all evaluators this iteration.
     pub gpu_leaves: u64,
+    /// Games that reached a terminal state this iteration.
+    pub finished_games: usize,
+    /// Games that hit `max_plies_per_game` without terminating.
+    pub cutoff_games: usize,
+    /// Mean plies across finished games (0.0 if none finished).
+    pub finished_plies_mean: f32,
+    /// p50 plies across finished games (0 if none finished).
+    pub finished_plies_p50: usize,
+    /// p95 plies across finished games (0 if none finished).
+    pub finished_plies_p95: usize,
+    /// Max plies across finished games (0 if none finished).
+    pub finished_plies_max: usize,
 }
 
 /// Passed to `on_self_play_step` once per ply, from the player thread that
@@ -156,6 +168,10 @@ where
         let new_samples = Arc::new(AtomicUsize::new(0));
         let gpu_dispatches = Arc::new(AtomicU64::new(0));
         let gpu_leaves = Arc::new(AtomicU64::new(0));
+        let cutoff_games = Arc::new(AtomicUsize::new(0));
+        let finished_plies: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::with_capacity(
+            config.games_per_iteration,
+        )));
 
         std::thread::scope(|s| {
             let evaluators = (0..NUM_EVALUATORS)
@@ -176,7 +192,10 @@ where
                         let mut requests = Vec::new();
 
                         while let Ok(first) = rx.recv() {
-                            let mut flat = Vec::new();
+                            let mut flat = Vec::with_capacity(
+                                OBS * config.games_per_iteration * config.sims_per_eval
+                                    / NUM_EVALUATORS,
+                            );
                             flat.extend_from_slice(&first.obs);
                             requests.push(first);
 
@@ -237,6 +256,8 @@ where
 
                 let replay_buffer_clone = replay_buffer.clone();
                 let new_samples_clone = new_samples.clone();
+                let cutoff_games_clone = cutoff_games.clone();
+                let finished_plies_clone = finished_plies.clone();
 
                 s.spawn(move || {
                     struct LiveGuard(Arc<AtomicUsize>);
@@ -326,6 +347,7 @@ where
                                 std::array::from_fn(|p| game.result(G::index_to_player(p)));
 
                             new_samples_clone.fetch_add(history.len(), Ordering::Relaxed);
+                            finished_plies_clone.lock().unwrap().push(plies);
 
                             let mut buffer = replay_buffer_clone.lock().unwrap();
                             buffer.extend(history.into_iter().map(|(obs, pol, _)| Sample {
@@ -336,6 +358,7 @@ where
 
                             return;
                         } else if config.max_plies_per_game.is_some_and(|c| plies >= c) {
+                            cutoff_games_clone.fetch_add(1, Ordering::Relaxed);
                             return;
                         }
                     }
@@ -393,6 +416,20 @@ where
             }
         }
 
+        let mut plies = std::mem::take(&mut *finished_plies.lock().unwrap());
+        plies.sort_unstable();
+        let finished_games = plies.len();
+        let (plies_mean, plies_p50, plies_p95, plies_max) = if finished_games == 0 {
+            (0.0, 0, 0, 0)
+        } else {
+            let sum: usize = plies.iter().sum();
+            let mean = sum as f32 / finished_games as f32;
+            let p50 = plies[finished_games / 2];
+            let p95 = plies[(finished_games * 95 / 100).min(finished_games - 1)];
+            let max = *plies.last().unwrap();
+            (mean, p50, p95, max)
+        };
+
         on_iteration(
             &IterationStats {
                 iteration,
@@ -404,6 +441,12 @@ where
                 elapsed_secs: iter_start.elapsed().as_secs_f32(),
                 gpu_dispatches: gpu_dispatches.load(Ordering::Relaxed),
                 gpu_leaves: gpu_leaves.load(Ordering::Relaxed),
+                finished_games,
+                cutoff_games: cutoff_games.load(Ordering::Relaxed),
+                finished_plies_mean: plies_mean,
+                finished_plies_p50: plies_p50,
+                finished_plies_p95: plies_p95,
+                finished_plies_max: plies_max,
             },
             &net,
         );

@@ -184,7 +184,7 @@ fn main() {
         let samples_per_sec = stats.new_samples as f32 / wall;
 
         eprintln!(
-            "az iter {}: samples={} ({:.0}/s) buf={} loss=(p={:.4} v={:.4} t={:.4}) {:.2}s | gpu[disp={} avg_bs={:.0} leaves={} leaves/s={:.0}] | actions[{}] | phases[{}]",
+            "az iter {}: samples={} ({:.0}/s) buf={} loss=(p={:.4} v={:.4} t={:.4}) {:.2}s | gpu[disp={} avg_bs={:.0} leaves={} leaves/s={:.0}] | games[fin={} cut={} plies mean={:.0} p50={} p95={} max={}] | actions[{}] | phases[{}]",
             stats.iteration,
             stats.new_samples,
             samples_per_sec,
@@ -197,6 +197,12 @@ fn main() {
             avg_batch,
             stats.gpu_leaves,
             leaves_per_sec,
+            stats.finished_games,
+            stats.cutoff_games,
+            stats.finished_plies_mean,
+            stats.finished_plies_p50,
+            stats.finished_plies_p95,
+            stats.finished_plies_max,
             action_str,
             phase_str,
         );
@@ -215,6 +221,24 @@ fn main() {
             data.insert("gpu/leaves".into(), stats.gpu_leaves.into());
             data.insert("gpu/avg_batch".into(), (avg_batch as f64).into());
             data.insert("gpu/leaves_per_sec".into(), (leaves_per_sec as f64).into());
+            data.insert("games/finished".into(), (stats.finished_games as u64).into());
+            data.insert("games/cutoff".into(), (stats.cutoff_games as u64).into());
+            data.insert(
+                "games/plies_mean".into(),
+                (stats.finished_plies_mean as f64).into(),
+            );
+            data.insert(
+                "games/plies_p50".into(),
+                (stats.finished_plies_p50 as u64).into(),
+            );
+            data.insert(
+                "games/plies_p95".into(),
+                (stats.finished_plies_p95 as u64).into(),
+            );
+            data.insert(
+                "games/plies_max".into(),
+                (stats.finished_plies_max as u64).into(),
+            );
             for (label, frac) in ACTION_BUCKET_LABELS.iter().zip(action_frac.iter()) {
                 data.insert(format!("action/{label}"), (*frac as f64).into());
             }

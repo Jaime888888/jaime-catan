@@ -1,0 +1,35 @@
+#!/bin/bash
+#SBATCH --job-name=catan
+#SBATCH --account=snazaria_1817
+#SBATCH --output=logs/%x-%j.out
+#SBATCH --error=logs/%x-%j.err
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:a100:1
+#SBATCH --constraint=a100
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=64G
+#SBATCH --time=24:00:00
+
+set -euo pipefail
+
+mkdir -p logs checkpoints
+
+module purge
+module load gcc/11.3.0
+module load cuda/12.4.0
+
+if ! command -v cargo >/dev/null 2>&1; then
+    if [ -f "$HOME/.cargo/env" ]; then
+        source "$HOME/.cargo/env"
+    fi
+fi
+
+export CARGO_TERM_COLOR=never
+export RUST_BACKTRACE=1
+export WANDB_API_KEY=<API KEY>
+
+nvidia-smi
+
+cargo build --release --features cuda --bin catan
+
+srun ./target/release/catan --checkpoint-dir ./checkpoints "$@"

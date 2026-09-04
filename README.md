@@ -1,5 +1,7 @@
 # Parallel AlphaZero for Catan
 
+[![CI](https://github.com/Jaime888888/jaime-catan/actions/workflows/ci.yml/badge.svg)](https://github.com/Jaime888888/jaime-catan/actions/workflows/ci.yml)
+
 A Rust research prototype that adapts AlphaZero-style self-play and Monte Carlo Tree Search (MCTS) to four-player Catan, then parallelizes the self-play pipeline across CPU game workers and batched GPU inference.
 
 > **Project status:** Experimental research code. The repository provides a Catan simulator, training pipeline, checkpointing, and arena evaluation; it is not a graphical or human-playable game client.

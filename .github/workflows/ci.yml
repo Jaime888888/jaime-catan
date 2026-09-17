@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select stable Rust
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - name: Run simulator rule tests
+        run: cargo test --locked -p catan-sim --lib --tests
